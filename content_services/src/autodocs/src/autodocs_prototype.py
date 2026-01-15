@@ -2233,6 +2233,8 @@ Your output is the full content of the document with editing updates based on yo
         graph: dict[str, set[str]],
         execution_mode: ExecutionMode,
         pdf_pages_dict: dict[str, list[str]],
+        # Checkpoint parameters (optional - for mid-annotation checkpointing)
+        checkpoint_params: dict | None = None,
     ) -> dict[str, list[Category]]:
         print(
             f"\n({BLUE}{llm.model}{RESET}) Annotating files for relevance to sections..."
@@ -2248,6 +2250,7 @@ Your output is the full content of the document with editing updates based on yo
             if node[1].source is not None:
                 coroutines.append(self._annotate_file(llm=llm, node=node))
         # Process this in groups:
+        num_file_coroutines = len(coroutines)
         for i in range(0, len(coroutines), MAX_CONCURRENT_ANNOTATIONS):
             batch = coroutines[i : i + MAX_CONCURRENT_ANNOTATIONS]
             print(f"[{pidx} / {total}] Annotating files...")
@@ -2255,6 +2258,24 @@ Your output is the full content of the document with editing updates based on yo
             for result in node_results:
                 tagged_nodes[result[0]] = result[1]
             pidx += len(batch)
+
+            # Mid-annotation checkpoint after each batch
+            if checkpoint_params is not None:
+                await self._save_checkpoint(
+                    source_version_node_id=checkpoint_params["source_version_node_id"],
+                    hatchet_id=checkpoint_params["hatchet_id"],
+                    bucket=checkpoint_params["bucket"],
+                    toml_content=checkpoint_params["toml_content"],
+                    config_hash=checkpoint_params["config_hash"],
+                    current_phase=AutoDocsPhase.ANNOTATING,
+                    started_at=checkpoint_params["started_at"],
+                    phase_current=i + len(batch),
+                    phase_total=num_file_coroutines,
+                    annotations=tagged_nodes,  # Partial annotations so far
+                    appended_reverse_topo_paths=checkpoint_params.get(
+                        "appended_reverse_topo_paths"
+                    ),
+                )
 
         # Annotate folders after (since they depend on files)
         for p, tech_docs in topo:
@@ -2903,12 +2924,26 @@ Your output is the full content of the document with editing updates based on yo
 
             # Annotate nodes with tags, if applicable.
             if self.document.use_tagging:
+                # Build checkpoint params for mid-annotation checkpointing
+                annotation_checkpoint_params = None
+                if can_checkpoint:
+                    annotation_checkpoint_params = {
+                        "source_version_node_id": source_version_node_id,
+                        "hatchet_id": hatchet_id,
+                        "bucket": bucket,
+                        "toml_content": toml_content,
+                        "config_hash": config_hash,
+                        "started_at": started_at,
+                        "appended_reverse_topo_paths": appended_reverse_topo_paths,
+                    }
+
                 annotations, pdf_annotations = await self._annotate_nodes(
                     llm=llm_tagging,
                     topo=appended_topo,
                     graph=joined_graph,
                     execution_mode=execution_mode,
                     pdf_pages_dict=pdf_pages_dict,
+                    checkpoint_params=annotation_checkpoint_params,
                 )
                 self._source_list = self._generate_sources_list(
                     annotations=annotations, pdf_annotations=pdf_annotations
