@@ -4,11 +4,13 @@ import concurrent.futures
 import copy
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import tomllib
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from graphlib import TopologicalSorter
 from pathlib import Path
@@ -38,6 +40,12 @@ from shared.prompts.structured_prompting import (
 from tqdm.asyncio import tqdm_asyncio
 from workflows.autodocs_functions import LLMGenerateInput, llm_generate_task
 
+from .checkpoint import (
+    AutoDocsCheckpoint,
+    AutoDocsPhase,
+    upload_autodocs_checkpoint,
+)
+
 try:
     with open("local_setup.json") as f:
         LOCAL_FILES: dict[str, str] = json.load(f)
@@ -48,6 +56,8 @@ OPENAI_SEM = asyncio.Semaphore(75)
 PDF_DOWNLOAD_DIR = "pdfs/"
 OPENAI_LIMITER = AsyncLimiter(50, 1)  # 50 requests per second
 MAX_CONCURRENT_ANNOTATIONS = 50
+
+logger = logging.getLogger(__name__)
 
 
 async def llm_generate(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
@@ -2665,12 +2675,106 @@ Your output is the full content of the document with editing updates based on yo
 
         return new_state
 
+    async def _save_checkpoint(
+        self,
+        source_version_node_id: str,
+        hatchet_id: str | None,
+        bucket: str,
+        toml_content: str,
+        config_hash: str,
+        current_phase: AutoDocsPhase,
+        started_at: datetime,
+        phase_current: int = 0,
+        phase_total: int = 0,
+        annotations: dict | None = None,
+        pdf_annotations: dict | None = None,
+        sections_content: list[dict] | None = None,
+        init_node_set: set | None = None,
+        current_topo_index: int = 0,
+        current_pdf_index: int = 0,
+        appended_reverse_topo_paths: list[str] | None = None,
+    ) -> None:
+        """Save a checkpoint to S3 for resumability.
+
+        This method creates a checkpoint with the current state and uploads it to S3.
+        All checkpoint save errors are logged but do not fail the main process.
+
+        Args:
+            source_version_node_id: The version node ID for checkpoint key
+            hatchet_id: Optional Hatchet workflow ID
+            bucket: S3 bucket name
+            toml_content: Full TOML config content
+            config_hash: Hash of TOML config for validation
+            current_phase: Current execution phase
+            started_at: When execution started
+            phase_current: Current progress within phase
+            phase_total: Total items in current phase
+            annotations: Node annotations dict (if tagging enabled)
+            pdf_annotations: PDF annotations dict
+            sections_content: Current section content
+            init_node_set: Nodes used for initial drafts
+            current_topo_index: Position in topo traversal
+            current_pdf_index: Position in PDF processing
+            appended_reverse_topo_paths: Paths for topo reconstruction
+        """
+        try:
+            # Convert annotations Category enums to int for JSON serialization
+            serializable_annotations = None
+            if annotations is not None:
+                serializable_annotations = {
+                    path: [int(cat) for cat in cats]
+                    for path, cats in annotations.items()
+                }
+
+            serializable_pdf_annotations = None
+            if pdf_annotations is not None:
+                serializable_pdf_annotations = {
+                    path: {
+                        page_idx: [int(cat) for cat in cats]
+                        for page_idx, cats in pages.items()
+                    }
+                    for path, pages in pdf_annotations.items()
+                }
+
+            checkpoint = AutoDocsCheckpoint(
+                source_version_node_id=source_version_node_id,
+                hatchet_id=hatchet_id,
+                config_hash=config_hash,
+                toml_content=toml_content,
+                started_at=started_at,
+                last_updated_at=datetime.now(UTC),
+                current_phase=current_phase,
+                phase_current=phase_current,
+                phase_total=phase_total,
+                use_tagging=self.document.use_tagging,
+                annotations=serializable_annotations,
+                pdf_annotations=serializable_pdf_annotations,
+                sections_content=sections_content,
+                init_node_set=list(init_node_set) if init_node_set else None,
+                current_topo_index=current_topo_index,
+                current_pdf_index=current_pdf_index,
+                appended_reverse_topo_paths=appended_reverse_topo_paths,
+            )
+
+            await upload_autodocs_checkpoint(checkpoint, bucket)
+            logger.info(
+                f"Checkpoint saved: phase={current_phase}, "
+                f"progress={phase_current}/{phase_total}"
+            )
+        except Exception as e:
+            # Checkpoint failures should never fail the main process
+            logger.warning(f"Failed to save checkpoint (non-fatal): {e}")
+
     async def generate(
         self,
         execution_mode: ExecutionMode,
         resume: bool = False,
         source_version_node_id: str | None = None,
         hatchet_id: str | None = None,
+        bucket: str | None = None,
+        checkpoint: AutoDocsCheckpoint | None = None,
+        toml_content: str = "",
+        config_hash: str = "",
     ) -> str:
         from shared.v3.utils.post_processing.mermaid import (
             fix_mermaid_syntax_in_response,
@@ -2693,6 +2797,18 @@ Your output is the full content of the document with editing updates based on yo
         )
         llm_copy_editor = ChatOpenAI(
             model=self.llm.copy_editor_model, temperature=0, request_timeout=900
+        )
+
+        # Track execution start time for checkpointing
+        started_at = datetime.now(UTC)
+        appended_reverse_topo_paths: list[str] | None = None
+
+        # Helper to check if checkpointing is enabled
+        can_checkpoint = (
+            bucket is not None
+            and source_version_node_id is not None
+            and toml_content
+            and config_hash
         )
 
         # Download PDFS if needed
@@ -2774,6 +2890,9 @@ Your output is the full content of the document with editing updates based on yo
             appended_reverse_topo = [tup for rt in reverse_topos for tup in rt]
             joined_graph = {k: v for dd in driver_docs for k, v in dd.dag.items()}
 
+            # Store paths for checkpoint (to reconstruct topo on resume)
+            appended_reverse_topo_paths = [p for p, _ in appended_reverse_topo]
+
             if execution_mode == ExecutionMode.MODAL:
                 await update_autodocs_status(
                     source_version_node_id=source_version_node_id,
@@ -2833,6 +2952,26 @@ Your output is the full content of the document with editing updates based on yo
                 "init_node_set": init_node_set,
             }
 
+            # Checkpoint after initialization - ready for section updates
+            if can_checkpoint:
+                await self._save_checkpoint(
+                    source_version_node_id=source_version_node_id,
+                    hatchet_id=hatchet_id,
+                    bucket=bucket,
+                    toml_content=toml_content,
+                    config_hash=config_hash,
+                    current_phase=AutoDocsPhase.SECTION_UPDATE,
+                    started_at=started_at,
+                    phase_current=pidx,
+                    phase_total=len(appended_reverse_topo),
+                    annotations=annotations,
+                    pdf_annotations=pdf_annotations,
+                    sections_content=section_state["sections"],
+                    init_node_set=init_node_set,
+                    current_topo_index=pidx,
+                    appended_reverse_topo_paths=appended_reverse_topo_paths,
+                )
+
         # Exhaustive updates
         if any(
             s.section_creation_method == SectionCreationMethod.SEQUENTIAL_EDIT
@@ -2867,6 +3006,26 @@ Your output is the full content of the document with editing updates based on yo
                 revisions.append(new_section_state)
                 section_state = new_section_state
 
+                # Checkpoint after each sequential update (mid-phase)
+                if can_checkpoint:
+                    await self._save_checkpoint(
+                        source_version_node_id=source_version_node_id,
+                        hatchet_id=hatchet_id,
+                        bucket=bucket,
+                        toml_content=toml_content,
+                        config_hash=config_hash,
+                        current_phase=AutoDocsPhase.SECTION_UPDATE,
+                        started_at=started_at,
+                        phase_current=pidx,
+                        phase_total=total,
+                        annotations=annotations,
+                        pdf_annotations=pdf_annotations,
+                        sections_content=section_state["sections"],
+                        init_node_set=init_node_set,
+                        current_topo_index=pidx,
+                        appended_reverse_topo_paths=appended_reverse_topo_paths,
+                    )
+
             if len(self.scope.pdfs) > 0:
                 pdf_paths = _get_pdf_paths(
                     [pdf_cfg.pdf_name for pdf_cfg in self.scope.pdfs],
@@ -2888,6 +3047,27 @@ Your output is the full content of the document with editing updates based on yo
                     revisions.append(new_section_state)
                     section_state = new_section_state
 
+                    # Checkpoint after each PDF update (UPDATING_PDFS phase)
+                    if can_checkpoint:
+                        await self._save_checkpoint(
+                            source_version_node_id=source_version_node_id,
+                            hatchet_id=hatchet_id,
+                            bucket=bucket,
+                            toml_content=toml_content,
+                            config_hash=config_hash,
+                            current_phase=AutoDocsPhase.UPDATING_PDFS,
+                            started_at=started_at,
+                            phase_current=pidx - total,
+                            phase_total=len(pdf_paths),
+                            annotations=annotations,
+                            pdf_annotations=pdf_annotations,
+                            sections_content=section_state["sections"],
+                            init_node_set=init_node_set,
+                            current_topo_index=total,
+                            current_pdf_index=pidx - total,
+                            appended_reverse_topo_paths=appended_reverse_topo_paths,
+                        )
+
         if execution_mode == ExecutionMode.MODAL:
             await update_autodocs_status(
                 source_version_node_id=source_version_node_id,
@@ -2908,6 +3088,20 @@ Your output is the full content of the document with editing updates based on yo
         new_section_state["_index"] = pidx
         revisions.append(new_section_state)
         section_state = new_section_state
+
+        # Checkpoint before assembly - formatting complete
+        if can_checkpoint:
+            await self._save_checkpoint(
+                source_version_node_id=source_version_node_id,
+                hatchet_id=hatchet_id,
+                bucket=bucket,
+                toml_content=toml_content,
+                config_hash=config_hash,
+                current_phase=AutoDocsPhase.BEFORE_ASSEMBLY,
+                started_at=started_at,
+                sections_content=section_state["sections"],
+            )
+
         if execution_mode == ExecutionMode.MODAL:
             await update_autodocs_status(
                 source_version_node_id=source_version_node_id,
