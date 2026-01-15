@@ -43,6 +43,7 @@ from workflows.autodocs_functions import LLMGenerateInput, llm_generate_task
 from .checkpoint import (
     AutoDocsCheckpoint,
     AutoDocsPhase,
+    ScatterState,
     upload_autodocs_checkpoint,
 )
 
@@ -1346,6 +1347,8 @@ Your output should be markdown formatted text.
         pdf_tagged_nodes: dict | None,
         tag_idx: int | None,
         section_name: str,
+        checkpoint_params: dict | None = None,
+        scatter_state: dict[str, ScatterState] | None = None,
     ) -> str:
         print(f"Creating node sections for {section_name}...")
         file_by_file_content = await self.create_node_sections(
@@ -1356,6 +1359,9 @@ Your output should be markdown formatted text.
             tagged_nodes,
             pdf_tagged_nodes,
             tag_idx,
+            section_title=section_name,
+            checkpoint_params=checkpoint_params,
+            scatter_state=scatter_state,
         )
 
         aggregate_docs = await self.aggregate_node_sections(
@@ -1383,11 +1389,26 @@ Your output should be markdown formatted text.
         tagged_nodes: dict | None,
         pdf_tagged_nodes: dict | None,
         tag_idx: int | None,
+        section_title: str | None = None,
+        checkpoint_params: dict | None = None,
+        scatter_state: dict[str, ScatterState] | None = None,
     ) -> dict:
         init_model = "o3-mini"
         llm = ChatOpenAI(model=init_model, request_timeout=500, temperature=0)
 
-        file_by_file_content = {}
+        # Check if we're resuming from a checkpoint for this section
+        existing_content: dict[str, str] = {}
+        nodes_already_processed = 0
+        if section_title and scatter_state and section_title in scatter_state:
+            existing_state = scatter_state[section_title]
+            existing_content = existing_state.file_by_file_content
+            nodes_already_processed = existing_state.nodes_processed
+            logger.info(
+                f"Resuming scatter for '{section_title}': "
+                f"{nodes_already_processed} nodes already processed"
+            )
+
+        file_by_file_content = dict(existing_content)  # Start with existing content
         node_coroutines = []
         ordered_nodes = []
 
@@ -1445,16 +1466,65 @@ Your output should be markdown formatted text.
 
         # Do it in batches to reduce heartbeat errors in Hatchet
         MAX_CONCURRENT_SCATTER_SECTIONS = 100
-        print(f"Generating {len(node_coroutines)} node sections...")
+        total_nodes = len(node_coroutines)
+        print(f"Generating {total_nodes} node sections...")
+
         for i in range(0, len(node_coroutines), MAX_CONCURRENT_SCATTER_SECTIONS):
+            # Skip batches that were already processed (resume case)
+            if i + MAX_CONCURRENT_SCATTER_SECTIONS <= nodes_already_processed:
+                continue
+
             batch = node_coroutines[i : i + MAX_CONCURRENT_SCATTER_SECTIONS]
             batch_nodes = ordered_nodes[i : i + MAX_CONCURRENT_SCATTER_SECTIONS]
+
+            # For partial batch resume, skip nodes already in file_by_file_content
+            if i < nodes_already_processed:
+                # We're in the middle of a partially-completed batch
+                skip_count = nodes_already_processed - i
+                batch = batch[skip_count:]
+                batch_nodes = batch_nodes[skip_count:]
+                if not batch:
+                    continue
+
             print(
-                f"Generating batch {i // MAX_CONCURRENT_SCATTER_SECTIONS + 1} with {len(batch)} node sections..."
+                f"Generating batch {i // MAX_CONCURRENT_SCATTER_SECTIONS + 1} "
+                f"with {len(batch)} node sections..."
             )
             batch_responses = await asyncio.gather(*batch)
             for ordered_node, response in zip(batch_nodes, batch_responses):
                 file_by_file_content[ordered_node] = response
+
+            # Update scatter_state and checkpoint after each batch
+            if (
+                checkpoint_params is not None
+                and section_title
+                and scatter_state is not None
+            ):
+                current_nodes_processed = min(
+                    i + MAX_CONCURRENT_SCATTER_SECTIONS, total_nodes
+                )
+                scatter_state[section_title] = ScatterState(
+                    file_by_file_content=file_by_file_content,
+                    nodes_processed=current_nodes_processed,
+                    nodes_total=total_nodes,
+                )
+                await self._save_checkpoint(
+                    source_version_node_id=checkpoint_params["source_version_node_id"],
+                    hatchet_id=checkpoint_params["hatchet_id"],
+                    bucket=checkpoint_params["bucket"],
+                    toml_content=checkpoint_params["toml_content"],
+                    config_hash=checkpoint_params["config_hash"],
+                    current_phase=AutoDocsPhase.SECTION_UPDATE,
+                    started_at=checkpoint_params["started_at"],
+                    phase_current=current_nodes_processed,
+                    phase_total=total_nodes,
+                    annotations=checkpoint_params.get("annotations"),
+                    scatter_state=scatter_state,
+                )
+                logger.info(
+                    f"Scatter checkpoint for '{section_title}': "
+                    f"{current_nodes_processed}/{total_nodes} nodes"
+                )
 
         print(f"Created {len(file_by_file_content)} node sections")
         return file_by_file_content
@@ -2327,6 +2397,8 @@ Your output is the full content of the document with editing updates based on yo
         pdf_annotations: dict,
         execution_mode: ExecutionMode,
         pdf_pages_dict: dict[str, list[str]],
+        checkpoint_params: dict | None = None,
+        existing_scatter_state: dict[str, ScatterState] | None = None,
     ) -> tuple[set[str], list[dict[str, str]]]:
         if self.scope.pdfs and any(
             s.section_creation_method == SectionCreationMethod.ONLY_PDFS
@@ -2416,6 +2488,12 @@ Your output is the full content of the document with editing updates based on yo
             s.section_creation_method == SectionCreationMethod.SCATTER_GATHER
             for s in self.sections
         ):
+            # Create shared scatter_state dict for mid-scatter checkpointing
+            # Start from existing state if resuming from checkpoint
+            scatter_state: dict[str, ScatterState] = (
+                dict(existing_scatter_state) if existing_scatter_state else {}
+            )
+
             scatter_gather_indices = []
             scatter_gather_coroutines = []
             for idx, s in enumerate(self.sections):
@@ -2432,6 +2510,8 @@ Your output is the full content of the document with editing updates based on yo
                             pdf_tagged_nodes=pdf_annotations,
                             tag_idx=idx,
                             section_name=s.title,
+                            checkpoint_params=checkpoint_params,
+                            scatter_state=scatter_state,
                         )
                     )
             scatter_gather_results = await asyncio.gather(*scatter_gather_coroutines)
@@ -2714,6 +2794,7 @@ Your output is the full content of the document with editing updates based on yo
         current_topo_index: int = 0,
         current_pdf_index: int = 0,
         appended_reverse_topo_paths: list[str] | None = None,
+        scatter_state: dict[str, ScatterState] | None = None,
     ) -> None:
         """Save a checkpoint to S3 for resumability.
 
@@ -2737,6 +2818,7 @@ Your output is the full content of the document with editing updates based on yo
             current_topo_index: Position in topo traversal
             current_pdf_index: Position in PDF processing
             appended_reverse_topo_paths: Paths for topo reconstruction
+            scatter_state: Per-section scatter progress for mid-scatter checkpointing
         """
         try:
             # Convert annotations Category enums to int for JSON serialization
@@ -2775,6 +2857,7 @@ Your output is the full content of the document with editing updates based on yo
                 current_topo_index=current_topo_index,
                 current_pdf_index=current_pdf_index,
                 appended_reverse_topo_paths=appended_reverse_topo_paths,
+                scatter_state=scatter_state,
             )
 
             await upload_autodocs_checkpoint(checkpoint, bucket)
@@ -2968,6 +3051,24 @@ Your output is the full content of the document with editing updates based on yo
             print(
                 f"\n({BLUE}{self.llm.section_init_model}{RESET}) Building initial section drafts for target scope in `{self.scope.code}`..."
             )
+
+            # Build checkpoint params for mid-scatter checkpointing
+            scatter_checkpoint_params = None
+            if can_checkpoint:
+                scatter_checkpoint_params = {
+                    "source_version_node_id": source_version_node_id,
+                    "hatchet_id": hatchet_id,
+                    "bucket": bucket,
+                    "toml_content": toml_content,
+                    "config_hash": config_hash,
+                    "started_at": started_at,
+                    "annotations": annotations,
+                    "appended_reverse_topo_paths": appended_reverse_topo_paths,
+                }
+
+            # Get existing scatter state from checkpoint for resume
+            existing_scatter_state = checkpoint.scatter_state if checkpoint else None
+
             init_node_set, sections_init = await self._initialize_sections(
                 llm=llm_section_init,
                 reverse_topos_from_start=reverse_topos,
@@ -2976,6 +3077,8 @@ Your output is the full content of the document with editing updates based on yo
                 pdf_annotations=pdf_annotations,
                 execution_mode=execution_mode,
                 pdf_pages_dict=pdf_pages_dict,
+                checkpoint_params=scatter_checkpoint_params,
+                existing_scatter_state=existing_scatter_state,
             )
             section_state["sections"] = sections_init
             section_state["_index"] = pidx
