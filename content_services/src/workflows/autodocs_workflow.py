@@ -25,6 +25,7 @@ async def autodocs_task(input: AutodocInput, ctx: Context) -> dict[str, str]:
         user_context=input.user_context,
         content_kind=input.content_kind,
         hatchet_id=ctx.workflow_run_id,
+        organization_id=input.organization_id,
     )
     print("executed autodocs task")
     return {"result": "autodoc completed"}
