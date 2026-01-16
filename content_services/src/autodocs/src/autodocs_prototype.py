@@ -3355,6 +3355,9 @@ Your output is the full content of the document with editing updates based on yo
                 self._source_list = self._generate_sources_list(
                     annotations=annotations, pdf_annotations=pdf_annotations
                 )
+                logger.info(
+                    f"Annotation phase complete: {len(annotations)} nodes annotated"
+                )
             else:
                 annotations = None
                 pdf_annotations = None
@@ -3433,6 +3436,9 @@ Your output is the full content of the document with editing updates based on yo
                     current_topo_index=pidx,
                     appended_reverse_topo_paths=appended_reverse_topo_paths,
                 )
+                logger.info(
+                    f"Section initialization complete: {len(sections_init)} sections created"
+                )
 
         # Exhaustive updates
         if any(
@@ -3440,6 +3446,7 @@ Your output is the full content of the document with editing updates based on yo
             for s in self.sections
         ):
             total = len(appended_reverse_topo)
+            logger.info(f"Starting sequential updates: {total} nodes to process")
             print(
                 f"\n({BLUE}{self.llm.section_update_model}{RESET}) Iteratively improving the initial state of the documents..."
             )
@@ -3488,11 +3495,14 @@ Your output is the full content of the document with editing updates based on yo
                         appended_reverse_topo_paths=appended_reverse_topo_paths,
                     )
 
+            logger.info(f"Sequential updates complete: processed {pidx - 1} nodes")
+
             if len(self.scope.pdfs) > 0:
                 pdf_paths = _get_pdf_paths(
                     [pdf_cfg.pdf_name for pdf_cfg in self.scope.pdfs],
                     execution_mode=execution_mode,
                 )
+                logger.info(f"Starting PDF updates: {len(pdf_paths)} PDFs to process")
                 for pdf_path in pdf_paths[pidx - total - 1 :]:
                     print(f"Updating sections with content from {pdf_path}...")
                     new_section_state = dict()
@@ -3529,6 +3539,7 @@ Your output is the full content of the document with editing updates based on yo
                             current_pdf_index=pidx - total,
                             appended_reverse_topo_paths=appended_reverse_topo_paths,
                         )
+                logger.info(f"PDF updates complete: processed {len(pdf_paths)} PDFs")
 
         # Skip formatting if resuming from BEFORE_ASSEMBLY (formatting already done)
         skip_formatting = (
@@ -3537,6 +3548,7 @@ Your output is the full content of the document with editing updates based on yo
         )
 
         if not skip_formatting:
+            logger.info("Starting formatting phase")
             if execution_mode == ExecutionMode.MODAL:
                 await update_autodocs_status(
                     source_version_node_id=source_version_node_id,
@@ -3570,6 +3582,7 @@ Your output is the full content of the document with editing updates based on yo
                     started_at=started_at,
                     sections_content=section_state["sections"],
                 )
+            logger.info("Formatting phase complete")
         else:
             logger.info("Skipping formatting phase (resuming from BEFORE_ASSEMBLY)")
 
@@ -3582,6 +3595,7 @@ Your output is the full content of the document with editing updates based on yo
             )
 
         # Final document assembly
+        logger.info("Starting assembly phase")
         final_doc_revisions = []
         print(
             f"\n({BLUE}{self.llm.assembly_model}{RESET}) Full document assembly pass..."
@@ -3617,6 +3631,7 @@ Your output is the full content of the document with editing updates based on yo
         final_doc_revisions.append(final_document)
         final_doc_revisions.append(fix_mermaid_syntax_in_response(text=final_document))
 
+        logger.info("Document generation complete")
         return final_doc_revisions[-1]
 
 
