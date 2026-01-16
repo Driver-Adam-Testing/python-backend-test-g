@@ -22,6 +22,7 @@ class AutodocInput(BaseModel):
     document_goal: str | None
     user_context: str | None
     content_kind: ContentKind | None
+    organization_id: str | None = None  # For checkpoint bucket computation
 
 
 class HandleGithubEventsInput(BaseModel):
