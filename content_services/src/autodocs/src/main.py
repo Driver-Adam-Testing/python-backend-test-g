@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -5,6 +6,8 @@ from math import ceil
 from typing import Any
 
 from database.models_enums import ContentKind
+from shared.file_storage.aws_s3_client import org_id_to_hash
+from shared.inspector.onboarding.onboard_utils import create_bucket_if_dne
 from workflows.autodocs_functions import WriteAutoDocLogInput, write_autodoc_log_task
 
 from .auto_toml.auto_toml import AutoToml
@@ -202,9 +205,11 @@ async def run_autodoc(
             # Compute config hash for checkpoint validation
             config_hash = compute_config_hash(toml_content)
 
-            # Compute bucket from org_id
-            hashed_org_id = hashlib.sha256(org_id.encode()).hexdigest()[:63]
-            bucket = f"driver-org-{hashed_org_id}"
+            # Compute bucket from org_id (same pattern as analytics)
+            bucket = org_id_to_hash(org_id)
+
+            # Ensure bucket exists (creates if not present)
+            await asyncio.to_thread(create_bucket_if_dne, bucket)
 
             # Try to load existing checkpoint
             checkpoint = await download_autodocs_checkpoint(
