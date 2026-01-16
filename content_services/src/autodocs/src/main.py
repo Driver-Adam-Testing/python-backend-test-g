@@ -21,6 +21,7 @@ from .autodocs_prototype import (
 )
 from .checkpoint import (
     compute_config_hash,
+    delete_autodocs_checkpoint,
     download_autodocs_checkpoint,
     validate_autodocs_checkpoint,
 )
@@ -357,6 +358,15 @@ async def run_autodoc(
                     misc_metadata=None,
                 )
                 session.add(derived_content)
+
+        # Clean up checkpoint after successful completion
+        if bucket:
+            try:
+                await delete_autodocs_checkpoint(bucket, str(version_node_id))
+                logger.info(f"Deleted autodocs checkpoint for {version_node_id}")
+            except Exception as e:
+                # Deletion failure should not fail the job
+                logger.warning(f"Failed to delete checkpoint (non-fatal): {e}")
 
         return (
             content_kind,
