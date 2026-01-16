@@ -31,6 +31,7 @@ async def deep_context_docs(
     new_version = await get_version_by_id(new_version_id)
     root_version_node_id = new_version.root_version_node.id
     root_node_id = new_version.root_version_node.node_id
+    organization_id = new_version.primary_asset.organization_id
 
     if old_version_content and code_diff:
         print(
@@ -88,6 +89,7 @@ async def deep_context_docs(
                     document_goal=ARCHITECTURE_OVERVIEW_INTENT,
                     user_context="SHORT",
                     content_kind=ContentKind.DEEP_CONTEXT_ARCHITECTURE,
+                    organization_id=organization_id,
                 )
             ),
             autodocs_task.aio_run(
@@ -97,6 +99,7 @@ async def deep_context_docs(
                     document_goal=LLM_ONBOARDING_INTENT,
                     user_context="SHORT",
                     content_kind=ContentKind.DEEP_CONTEXT_LLM_ONBOARDING,
+                    organization_id=organization_id,
                 )
             ),
         ]
