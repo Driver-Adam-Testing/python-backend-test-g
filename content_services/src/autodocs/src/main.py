@@ -36,6 +36,7 @@ async def run_autodoc(
     user_context: str | None = None,
     content_kind: ContentKind | None = None,
     hatchet_id: str | None = None,
+    organization_id: str | None = None,  # For checkpoint bucket computation
 ) -> None:
     import hashlib
 
@@ -68,6 +69,9 @@ async def run_autodoc(
             "document_goal is required when config_kind is FROM_DOCUMENT_GOAL"
         )
 
+    # org_id is extracted from DB when possible, falls back to organization_id parameter
+    org_id = None
+
     try:
         # Get document sources given page id
         if is_page:
@@ -88,7 +92,6 @@ async def run_autodoc(
                     pdfs=[],
                 )
 
-                org_id = None
                 for source in document_sources:
                     if not org_id:
                         org_id = source.source_version_node.version.primary_asset.organization_id
@@ -125,6 +128,10 @@ async def run_autodoc(
                     node_path=source_version_node.relative_path.rstrip("/"),
                 )
                 scope.code.append(code_cfg)
+
+        # Fallback to organization_id parameter if not extracted from DB
+        if not org_id and organization_id:
+            org_id = organization_id
 
         match config_kind:
             case AutoDocConfigKind.ADI_DRIVER:
