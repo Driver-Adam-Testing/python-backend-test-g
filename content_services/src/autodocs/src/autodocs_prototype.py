@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 import tomllib
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
@@ -1349,6 +1349,7 @@ Your output should be markdown formatted text.
         section_name: str,
         checkpoint_params: dict | None = None,
         scatter_state: dict[str, ScatterState] | None = None,
+        save_checkpoint_callback: Callable[..., Any] | None = None,
     ) -> str:
         print(f"Creating node sections for {section_name}...")
         file_by_file_content = await self.create_node_sections(
@@ -1362,6 +1363,7 @@ Your output should be markdown formatted text.
             section_title=section_name,
             checkpoint_params=checkpoint_params,
             scatter_state=scatter_state,
+            save_checkpoint_callback=save_checkpoint_callback,
         )
 
         aggregate_docs = await self.aggregate_node_sections(
@@ -1392,6 +1394,7 @@ Your output should be markdown formatted text.
         section_title: str | None = None,
         checkpoint_params: dict | None = None,
         scatter_state: dict[str, ScatterState] | None = None,
+        save_checkpoint_callback: Callable[..., Any] | None = None,
     ) -> dict:
         init_model = "o3-mini"
         llm = ChatOpenAI(model=init_model, request_timeout=500, temperature=0)
@@ -1499,6 +1502,7 @@ Your output should be markdown formatted text.
                 checkpoint_params is not None
                 and section_title
                 and scatter_state is not None
+                and save_checkpoint_callback is not None
             ):
                 current_nodes_processed = min(
                     i + MAX_CONCURRENT_SCATTER_SECTIONS, total_nodes
@@ -1508,7 +1512,7 @@ Your output should be markdown formatted text.
                     nodes_processed=current_nodes_processed,
                     nodes_total=total_nodes,
                 )
-                await self._save_checkpoint(
+                await save_checkpoint_callback(
                     source_version_node_id=checkpoint_params["source_version_node_id"],
                     hatchet_id=checkpoint_params["hatchet_id"],
                     bucket=checkpoint_params["bucket"],
@@ -2540,6 +2544,7 @@ Your output is the full content of the document with editing updates based on yo
                             section_name=s.title,
                             checkpoint_params=checkpoint_params,
                             scatter_state=scatter_state,
+                            save_checkpoint_callback=self._save_checkpoint,
                         )
                     )
             scatter_gather_results = await asyncio.gather(*scatter_gather_coroutines)
