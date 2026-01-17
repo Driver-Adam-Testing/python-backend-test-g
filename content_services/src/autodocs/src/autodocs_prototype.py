@@ -1523,6 +1523,9 @@ Your output should be markdown formatted text.
                     phase_current=current_nodes_processed,
                     phase_total=total_nodes,
                     annotations=checkpoint_params.get("annotations"),
+                    appended_reverse_topo_paths=checkpoint_params[
+                        "appended_reverse_topo_paths"
+                    ],
                     scatter_state=scatter_state,
                 )
                 logger.info(
