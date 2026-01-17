@@ -172,23 +172,62 @@ async def run_autodoc(
                         toml_content = f.read()
 
             case AutoDocConfigKind.FROM_DOCUMENT_GOAL:
-                toml_uuid = str(uuid.uuid4())
-                toml_file = f"config_{toml_uuid}.toml"
-                if is_page:
-                    auto_toml = AutoToml.from_page_id(
-                        version_node_id, enable_auto_scaling=True
+                # For FROM_DOCUMENT_GOAL, check for checkpoint BEFORE running AutoTOML
+                # AutoTOML is slow and non-deterministic (produces different sections each run)
+                # If a valid checkpoint exists with saved TOML, we must use it for section consistency
+                bucket = None
+                checkpoint = None
+                config_hash = ""
+
+                if org_id:
+                    bucket = org_id_to_hash(org_id)
+                    await asyncio.to_thread(create_bucket_if_dne, bucket)
+                    checkpoint = await download_autodocs_checkpoint(
+                        bucket=bucket,
+                        source_version_node_id=str(version_node_id),
                     )
+
+                if checkpoint and checkpoint.toml_content:
+                    # Valid checkpoint with saved TOML - use it and skip AutoTOML
+                    logger.info(
+                        f"Resuming from checkpoint: phase={checkpoint.current_phase}, "
+                        f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
+                    )
+                    logger.info(
+                        "Using saved TOML from checkpoint, skipping AutoTOML generation"
+                    )
+                    toml_content = checkpoint.toml_content
+                    config_hash = checkpoint.config_hash
+                    toml_uuid = str(uuid.uuid4())
+                    toml_file = f"config_{toml_uuid}.toml"
+                    with open(toml_file, "w") as f:
+                        f.write(toml_content)
+                    config = AutoDocCfg.from_file(toml_file=toml_file)
                 else:
-                    auto_toml = AutoToml.from_root_node_id(
-                        root_node_id=version_node_id, enable_auto_scaling=True
+                    # No valid checkpoint - run AutoTOML to generate TOML
+                    if checkpoint:
+                        logger.warning(
+                            "Checkpoint exists but missing toml_content, starting fresh"
+                        )
+                        checkpoint = None
+                    toml_uuid = str(uuid.uuid4())
+                    toml_file = f"config_{toml_uuid}.toml"
+                    if is_page:
+                        auto_toml = AutoToml.from_page_id(
+                            version_node_id, enable_auto_scaling=True
+                        )
+                    else:
+                        auto_toml = AutoToml.from_root_node_id(
+                            root_node_id=version_node_id, enable_auto_scaling=True
+                        )
+                    toml_content = await auto_toml.generate(
+                        document_goal=document_goal,
+                        user_context=user_context if user_context else "",
                     )
-                toml_content = await auto_toml.generate(
-                    document_goal=document_goal,
-                    user_context=user_context if user_context else "",
-                )
-                with open(toml_file, "w") as f:
-                    f.write(toml_content)
-                config = AutoDocCfg.from_file(toml_file=toml_file)
+                    with open(toml_file, "w") as f:
+                        f.write(toml_content)
+                    config = AutoDocCfg.from_file(toml_file=toml_file)
+                    config_hash = compute_config_hash(toml_content)
             case _:
                 raise ValueError(f"Unsupported config kind: {config_kind}")
 
@@ -196,50 +235,57 @@ async def run_autodoc(
         config.scope = scope
         print(config.scope)
 
-        # Checkpoint loading (only enabled when toml_content is set, e.g., FROM_DOCUMENT_GOAL)
-        bucket = None
-        checkpoint = None
-        config_hash = ""
+        # Checkpoint loading for non-FROM_DOCUMENT_GOAL cases (e.g., CUSTOM)
+        # Note: FROM_DOCUMENT_GOAL handles checkpoint loading BEFORE AutoTOML generation
+        # to avoid running AutoTOML twice (it's slow and non-deterministic)
+        if config_kind != AutoDocConfigKind.FROM_DOCUMENT_GOAL:
+            bucket = None
+            checkpoint = None
+            config_hash = ""
 
-        if toml_content and org_id:
-            # Compute config hash for checkpoint validation
-            config_hash = compute_config_hash(toml_content)
+            if toml_content and org_id:
+                # Compute config hash for checkpoint validation
+                config_hash = compute_config_hash(toml_content)
 
-            # Compute bucket from org_id (same pattern as analytics)
-            bucket = org_id_to_hash(org_id)
+                # Compute bucket from org_id (same pattern as analytics)
+                bucket = org_id_to_hash(org_id)
 
-            # Ensure bucket exists (creates if not present)
-            await asyncio.to_thread(create_bucket_if_dne, bucket)
+                # Ensure bucket exists (creates if not present)
+                await asyncio.to_thread(create_bucket_if_dne, bucket)
 
-            # Try to load existing checkpoint
-            checkpoint = await download_autodocs_checkpoint(
-                bucket=bucket,
-                source_version_node_id=str(version_node_id),
-            )
+                # Try to load existing checkpoint
+                checkpoint = await download_autodocs_checkpoint(
+                    bucket=bucket,
+                    source_version_node_id=str(version_node_id),
+                )
 
-            if checkpoint:
-                # Validate checkpoint against current config
-                use_tagging = config.document.use_tagging
-                if validate_autodocs_checkpoint(checkpoint, config_hash, use_tagging):
-                    logger.info(
-                        f"Resuming from checkpoint: phase={checkpoint.current_phase}, "
-                        f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
-                    )
-                    # Use saved TOML content from checkpoint for section consistency
-                    if checkpoint.toml_content:
-                        toml_content = checkpoint.toml_content
-                        config = AutoDocCfg.from_string(toml_content)
-                        config.scope = scope  # Preserve the scope we built
-                        logger.info("Using TOML content from checkpoint")
-                else:
-                    logger.warning(
-                        "Checkpoint invalid (config/version mismatch), starting fresh"
-                    )
-                    checkpoint = None
-        elif not toml_content:
-            logger.debug("Checkpointing disabled: no toml_content (legacy config flow)")
-        elif not org_id:
-            logger.warning("Checkpointing disabled: no organization_id available")
+                if checkpoint:
+                    # Validate checkpoint against current config
+                    use_tagging = config.document.use_tagging
+                    if validate_autodocs_checkpoint(
+                        checkpoint, config_hash, use_tagging
+                    ):
+                        logger.info(
+                            f"Resuming from checkpoint: phase={checkpoint.current_phase}, "
+                            f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
+                        )
+                        # Use saved TOML content from checkpoint for section consistency
+                        if checkpoint.toml_content:
+                            toml_content = checkpoint.toml_content
+                            config = AutoDocCfg.from_string(toml_content)
+                            config.scope = scope  # Preserve the scope we built
+                            logger.info("Using TOML content from checkpoint")
+                    else:
+                        logger.warning(
+                            "Checkpoint invalid (config/version mismatch), starting fresh"
+                        )
+                        checkpoint = None
+            elif not toml_content:
+                logger.debug(
+                    "Checkpointing disabled: no toml_content (legacy config flow)"
+                )
+            elif not org_id:
+                logger.warning("Checkpointing disabled: no organization_id available")
 
         init_state = await AutoDocInitState.from_cfg(
             cfg=config,
