@@ -1,12 +1,13 @@
 """Checkpoint data class and storage for AutoDocs resume capability.
 
 This module provides:
-- AutoDocsCheckpoint: Pydantic model for checkpoint state
-- Async S3 upload/download/delete functions (for use in async generate())
-- Validation logic for checkpoint compatibility
+- AutoDocsCheckpoint: Pydantic model with persistence methods (save, delete, load_for_resume)
+- AutoDocsPhase: Enum for tracking execution phases
+- ScatterState, GatherState: Models for mid-phase progress tracking
+- compute_config_hash: Hash function for TOML config validation
 
 Design follows the analytics checkpoint pattern but adapted for AutoDocs:
-- Async wrappers around sync S3 operations (generate() is async)
+- Async methods on checkpoint class wrap sync S3 operations
 - Phase-based progress tracking instead of commit-based
 - Config hash validation instead of git SHA validation
 - TOML content preservation for dynamically-generated configs
@@ -19,11 +20,11 @@ import logging
 import os
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,6 @@ class AutoDocsPhase(StrEnum):
     BEFORE_ASSEMBLY = "before_assembly"
     ASSEMBLING = "assembling"
     COMPLETE = "complete"
-
-
-# Phase ordering for comparison (phases are linearly ordered)
-_PHASE_ORDER = {phase: idx for idx, phase in enumerate(AutoDocsPhase)}
-
-
-def phase_is_before_or_equal(phase_a: AutoDocsPhase, phase_b: AutoDocsPhase) -> bool:
-    """Check if phase_a is before or equal to phase_b in execution order."""
-    return _PHASE_ORDER[phase_a] <= _PHASE_ORDER[phase_b]
 
 
 class ScatterState(BaseModel):
@@ -151,6 +143,140 @@ class AutoDocsCheckpoint(BaseModel):
         None  # Just paths, not full TechDocsContent
     )
 
+    # === State Mutation ===
+
+    def update_phase(
+        self, phase: "AutoDocsPhase", current: int = 0, total: int = 0
+    ) -> None:
+        self.current_phase = phase
+        self.phase_current = current
+        self.phase_total = total
+        self.last_updated_at = datetime.now(UTC)
+
+    def update_annotations(
+        self,
+        annotations: dict[str, list],
+        pdf_annotations: dict[str, dict[int, list]] | None = None,
+    ) -> None:
+        # Convert Category enums (IntEnum) to int for JSON serialization
+        self.annotations = {
+            path: [int(cat) for cat in cats] for path, cats in annotations.items()
+        }
+        if pdf_annotations is not None:
+            self.pdf_annotations = {
+                path: {
+                    page_idx: [int(cat) for cat in cats]
+                    for page_idx, cats in pages.items()
+                }
+                for path, pages in pdf_annotations.items()
+            }
+        self.last_updated_at = datetime.now(UTC)
+
+    def update_sections(
+        self,
+        sections_content: list[dict],
+        init_node_set: set | None = None,
+    ) -> None:
+        self.sections_content = sections_content
+        self.init_node_set = list(init_node_set) if init_node_set else None
+        self.last_updated_at = datetime.now(UTC)
+
+    def update_scatter_state(self, section_title: str, state: "ScatterState") -> None:
+        if self.scatter_state is None:
+            self.scatter_state = {}
+        self.scatter_state[section_title] = state
+        self.last_updated_at = datetime.now(UTC)
+
+    def update_topo_index(self, index: int) -> None:
+        self.current_topo_index = index
+        self.last_updated_at = datetime.now(UTC)
+
+    def update_pdf_index(self, index: int) -> None:
+        self.current_pdf_index = index
+        self.last_updated_at = datetime.now(UTC)
+
+    # === Validation ===
+
+    def is_valid_for_resume(self, config_hash: str, use_tagging: bool) -> bool:
+        if self.config_hash != config_hash:
+            logger.warning(
+                f"Autodocs checkpoint config mismatch: "
+                f"{self.config_hash} != {config_hash} (current)"
+            )
+            return False
+
+        if self.use_tagging != use_tagging:
+            logger.warning(
+                f"Autodocs checkpoint use_tagging mismatch: "
+                f"{self.use_tagging} != {use_tagging} (current)"
+            )
+            return False
+
+        return True
+
+    # === Persistence ===
+
+    async def save(self, bucket: str, s3_client: Any = None) -> None:
+        try:
+            await asyncio.to_thread(_upload_checkpoint_sync, self, bucket, s3_client)
+            logger.info(
+                f"Checkpoint saved: phase={self.current_phase}, "
+                f"progress={self.phase_current}/{self.phase_total}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save checkpoint (non-fatal): {e}")
+
+    async def delete(self, bucket: str, s3_client: Any = None) -> None:
+        await asyncio.to_thread(
+            _delete_checkpoint_sync, bucket, self.source_version_node_id, s3_client
+        )
+
+    # === Factory/Loading ===
+
+    @classmethod
+    async def load_for_resume(
+        cls,
+        bucket: str,
+        svn_id: str,
+        config_hash: str,
+        use_tagging: bool,
+        s3_client: Any = None,
+    ) -> Self | None:
+        """Load and validate checkpoint in one step. Returns None if not found or invalid."""
+        checkpoint = await asyncio.to_thread(
+            _download_checkpoint_sync, bucket, svn_id, s3_client
+        )
+
+        if checkpoint is None:
+            return None
+
+        if not checkpoint.is_valid_for_resume(config_hash, use_tagging):
+            logger.warning("Checkpoint invalid for resume, starting fresh")
+            return None
+
+        return checkpoint
+
+    @classmethod
+    def create_initial(
+        cls,
+        source_version_node_id: str,
+        hatchet_id: str | None,
+        toml_content: str,
+        config_hash: str,
+        use_tagging: bool,
+        appended_reverse_topo_paths: list[str] | None = None,
+    ) -> Self:
+        return cls(
+            source_version_node_id=source_version_node_id,
+            hatchet_id=hatchet_id,
+            config_hash=config_hash,
+            toml_content=toml_content,
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.INITIALIZING,
+            use_tagging=use_tagging,
+            appended_reverse_topo_paths=appended_reverse_topo_paths,
+        )
+
 
 def compute_config_hash(toml_content: str) -> str:
     """Compute a hash of TOML config content for validation.
@@ -179,13 +305,6 @@ def _upload_checkpoint_sync(
     bucket: str,
     s3_client: Any = None,
 ) -> None:
-    """Upload checkpoint to S3 (sync version for use with asyncio.to_thread).
-
-    Args:
-        checkpoint: Checkpoint to upload
-        bucket: S3 bucket name
-        s3_client: Optional boto3 S3 client (for testing)
-    """
     if s3_client is None:
         s3_client = boto3.client(
             "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
@@ -211,16 +330,6 @@ def _download_checkpoint_sync(
     source_version_node_id: str,
     s3_client: Any = None,
 ) -> AutoDocsCheckpoint | None:
-    """Download checkpoint from S3 (sync version for use with asyncio.to_thread).
-
-    Args:
-        bucket: S3 bucket name
-        source_version_node_id: ID to download checkpoint for
-        s3_client: Optional boto3 S3 client (for testing)
-
-    Returns:
-        AutoDocsCheckpoint if found and valid, None otherwise
-    """
     if s3_client is None:
         s3_client = boto3.client(
             "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
@@ -228,33 +337,40 @@ def _download_checkpoint_sync(
 
     key = _get_autodocs_checkpoint_key(source_version_node_id)
 
+    # Fetch from S3
     try:
         response = s3_client.get_object(Bucket=bucket, Key=key)
         body = response["Body"].read()
-
-        # Parse and validate version BEFORE Pydantic deserialization
-        data = json.loads(body)
-        if not _validate_checkpoint_version(data):
-            logger.warning("Discarding autodocs checkpoint due to version mismatch")
-            return None
-
-        checkpoint = AutoDocsCheckpoint.model_validate_json(body)
-
-        logger.info(
-            f"Downloaded autodocs checkpoint: phase={checkpoint.current_phase}, "
-            f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
-        )
-        return checkpoint
-
     except ClientError as e:
         if e.response["Error"]["Code"] == "NoSuchKey":
             logger.debug(f"No autodocs checkpoint found at s3://{bucket}/{key}")
             return None
-        logger.warning(f"Error downloading autodocs checkpoint: {e}")
+        raise
+
+    # Parse JSON
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        logger.warning("Checkpoint JSON corrupted")
         return None
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"Autodocs checkpoint corrupted or invalid: {e}")
+
+    # Validate version
+    if not _validate_checkpoint_version(data):
+        logger.warning("Discarding autodocs checkpoint due to version mismatch")
         return None
+
+    # Deserialize to Pydantic model
+    try:
+        checkpoint = AutoDocsCheckpoint.model_validate_json(body)
+    except ValidationError:
+        logger.warning("Checkpoint validation failed")
+        return None
+
+    logger.info(
+        f"Downloaded autodocs checkpoint: phase={checkpoint.current_phase}, "
+        f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
+    )
+    return checkpoint
 
 
 def _delete_checkpoint_sync(
@@ -283,121 +399,16 @@ def _delete_checkpoint_sync(
 
 
 # =============================================================================
-# Async S3 Operations (public API)
-# =============================================================================
-
-
-async def upload_autodocs_checkpoint(
-    checkpoint: AutoDocsCheckpoint,
-    bucket: str,
-    s3_client: Any = None,
-) -> None:
-    """Upload checkpoint to S3 asynchronously.
-
-    Args:
-        checkpoint: Checkpoint to upload
-        bucket: S3 bucket name
-        s3_client: Optional boto3 S3 client (for testing)
-    """
-    await asyncio.to_thread(_upload_checkpoint_sync, checkpoint, bucket, s3_client)
-
-
-async def download_autodocs_checkpoint(
-    bucket: str,
-    source_version_node_id: str,
-    s3_client: Any = None,
-) -> AutoDocsCheckpoint | None:
-    """Download checkpoint from S3 asynchronously.
-
-    Args:
-        bucket: S3 bucket name
-        source_version_node_id: ID to download checkpoint for
-        s3_client: Optional boto3 S3 client (for testing)
-
-    Returns:
-        AutoDocsCheckpoint if found and valid, None otherwise
-    """
-    return await asyncio.to_thread(
-        _download_checkpoint_sync, bucket, source_version_node_id, s3_client
-    )
-
-
-async def delete_autodocs_checkpoint(
-    bucket: str,
-    source_version_node_id: str,
-    s3_client: Any = None,
-) -> None:
-    """Delete checkpoint from S3 asynchronously.
-
-    Note: This function does NOT have internal error handling.
-    Callers should wrap in try/except if deletion failure should be non-fatal.
-
-    Args:
-        bucket: S3 bucket name
-        source_version_node_id: ID to delete checkpoint for
-        s3_client: Optional boto3 S3 client (for testing)
-    """
-    await asyncio.to_thread(
-        _delete_checkpoint_sync, bucket, source_version_node_id, s3_client
-    )
-
-
-# =============================================================================
-# Validation Functions
+# Validation Functions (internal)
 # =============================================================================
 
 
 def _validate_checkpoint_version(checkpoint_data: dict) -> bool:
-    """Check if checkpoint version matches current version.
-
-    Args:
-        checkpoint_data: Raw checkpoint data dict
-
-    Returns:
-        True if version matches, False otherwise
-    """
+    """Check if checkpoint version matches current version."""
     version = checkpoint_data.get("version", "unknown")
     if version != AUTODOCS_CHECKPOINT_VERSION:
         logger.warning(
             f"Autodocs checkpoint version mismatch: {version} != {AUTODOCS_CHECKPOINT_VERSION}"
         )
         return False
-    return True
-
-
-def validate_autodocs_checkpoint(
-    checkpoint: AutoDocsCheckpoint,
-    config_hash: str,
-    use_tagging: bool,
-) -> bool:
-    """Validate checkpoint is compatible with current run configuration.
-
-    Checks:
-    1. Config hash matches (TOML hasn't changed)
-    2. use_tagging flag matches (consistent annotation state)
-
-    Args:
-        checkpoint: Checkpoint to validate
-        config_hash: Hash of current TOML config
-        use_tagging: Current use_tagging setting
-
-    Returns:
-        True if valid for resume, False if checkpoint should be discarded
-    """
-    # Check config hash
-    if checkpoint.config_hash != config_hash:
-        logger.warning(
-            f"Autodocs checkpoint config mismatch: "
-            f"{checkpoint.config_hash} != {config_hash} (current)"
-        )
-        return False
-
-    # Check use_tagging consistency
-    if checkpoint.use_tagging != use_tagging:
-        logger.warning(
-            f"Autodocs checkpoint use_tagging mismatch: "
-            f"{checkpoint.use_tagging} != {use_tagging} (current)"
-        )
-        return False
-
     return True
