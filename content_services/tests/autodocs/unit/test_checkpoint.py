@@ -200,63 +200,6 @@ instruction = "Describe the system"
         assert restored.toml_content == toml_content
 
 
-class TestPhaseOrdering:
-    """Tests for phase ordering and comparison."""
-
-    def test_phase_ordering_correct(self):
-        """Phases should be ordered correctly for resume logic."""
-        from autodocs.src.checkpoint import AutoDocsPhase, phase_is_before_or_equal
-
-        # INITIALIZING is before everything
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.INITIALIZING, AutoDocsPhase.ANNOTATING
-        )
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.INITIALIZING, AutoDocsPhase.COMPLETE
-        )
-
-        # ANNOTATING is before SECTION_UPDATE
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.ANNOTATING, AutoDocsPhase.SECTION_UPDATE
-        )
-
-        # SECTION_UPDATE is before UPDATING_PDFS
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.SECTION_UPDATE, AutoDocsPhase.UPDATING_PDFS
-        )
-
-        # BEFORE_ASSEMBLY is before ASSEMBLING
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.BEFORE_ASSEMBLY, AutoDocsPhase.ASSEMBLING
-        )
-
-        # ASSEMBLING is before COMPLETE
-        assert phase_is_before_or_equal(
-            AutoDocsPhase.ASSEMBLING, AutoDocsPhase.COMPLETE
-        )
-
-    def test_phase_equal_to_self(self):
-        """Each phase should be before_or_equal to itself."""
-        from autodocs.src.checkpoint import AutoDocsPhase, phase_is_before_or_equal
-
-        for phase in AutoDocsPhase:
-            assert phase_is_before_or_equal(phase, phase)
-
-    def test_later_phase_not_before_earlier(self):
-        """Later phases should not be before earlier phases."""
-        from autodocs.src.checkpoint import AutoDocsPhase, phase_is_before_or_equal
-
-        assert not phase_is_before_or_equal(
-            AutoDocsPhase.COMPLETE, AutoDocsPhase.INITIALIZING
-        )
-        assert not phase_is_before_or_equal(
-            AutoDocsPhase.SECTION_UPDATE, AutoDocsPhase.ANNOTATING
-        )
-        assert not phase_is_before_or_equal(
-            AutoDocsPhase.ASSEMBLING, AutoDocsPhase.FORMATTING
-        )
-
-
 class TestConfigHash:
     """Tests for config hash computation."""
 
@@ -301,7 +244,6 @@ class TestCheckpointValidation:
             AutoDocsCheckpoint,
             AutoDocsPhase,
             compute_config_hash,
-            validate_autodocs_checkpoint,
         )
 
         toml = "[document]\ngoal = 'test'"
@@ -316,18 +258,11 @@ class TestCheckpointValidation:
             use_tagging=True,
         )
 
-        assert (
-            validate_autodocs_checkpoint(checkpoint, config_hash, use_tagging=True)
-            is True
-        )
+        assert checkpoint.is_valid_for_resume(config_hash, use_tagging=True) is True
 
     def test_config_hash_mismatch_fails(self):
         """Checkpoint with different config hash should fail validation."""
-        from autodocs.src.checkpoint import (
-            AutoDocsCheckpoint,
-            AutoDocsPhase,
-            validate_autodocs_checkpoint,
-        )
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
@@ -339,17 +274,12 @@ class TestCheckpointValidation:
         )
 
         assert (
-            validate_autodocs_checkpoint(checkpoint, "new_hash_67890", use_tagging=True)
-            is False
+            checkpoint.is_valid_for_resume("new_hash_67890", use_tagging=True) is False
         )
 
     def test_use_tagging_mismatch_fails(self):
         """Checkpoint with different use_tagging should fail validation."""
-        from autodocs.src.checkpoint import (
-            AutoDocsCheckpoint,
-            AutoDocsPhase,
-            validate_autodocs_checkpoint,
-        )
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
@@ -360,10 +290,7 @@ class TestCheckpointValidation:
             use_tagging=True,
         )
 
-        assert (
-            validate_autodocs_checkpoint(checkpoint, "abc123", use_tagging=False)
-            is False
-        )
+        assert checkpoint.is_valid_for_resume("abc123", use_tagging=False) is False
 
     def test_version_mismatch_fails(self):
         """Checkpoint with wrong version should fail validation."""
@@ -556,67 +483,6 @@ class TestCheckpointS3Storage:
         )
 
 
-class TestAsyncWrappers:
-    """Tests for async S3 operation wrappers."""
-
-    @pytest.mark.asyncio
-    async def test_async_upload_uses_to_thread(self):
-        """Async upload should use asyncio.to_thread."""
-        from autodocs.src.checkpoint import (
-            AutoDocsCheckpoint,
-            AutoDocsPhase,
-            upload_autodocs_checkpoint,
-        )
-
-        checkpoint = AutoDocsCheckpoint(
-            source_version_node_id="test",
-            config_hash="abc123",
-            toml_content="",
-            started_at=datetime.now(UTC),
-            current_phase=AutoDocsPhase.INITIALIZING,
-        )
-
-        mock_s3 = MagicMock()
-
-        with patch("autodocs.src.checkpoint.asyncio.to_thread") as mock_to_thread:
-            mock_to_thread.return_value = None
-            await upload_autodocs_checkpoint(checkpoint, "test-bucket", mock_s3)
-
-            mock_to_thread.assert_called_once()
-            # First arg should be the sync function
-            assert mock_to_thread.call_args[0][0].__name__ == "_upload_checkpoint_sync"
-
-    @pytest.mark.asyncio
-    async def test_async_download_uses_to_thread(self):
-        """Async download should use asyncio.to_thread."""
-        from autodocs.src.checkpoint import download_autodocs_checkpoint
-
-        mock_s3 = MagicMock()
-
-        with patch("autodocs.src.checkpoint.asyncio.to_thread") as mock_to_thread:
-            mock_to_thread.return_value = None
-            await download_autodocs_checkpoint("test-bucket", "test-svn", mock_s3)
-
-            mock_to_thread.assert_called_once()
-            assert (
-                mock_to_thread.call_args[0][0].__name__ == "_download_checkpoint_sync"
-            )
-
-    @pytest.mark.asyncio
-    async def test_async_delete_uses_to_thread(self):
-        """Async delete should use asyncio.to_thread."""
-        from autodocs.src.checkpoint import delete_autodocs_checkpoint
-
-        mock_s3 = MagicMock()
-
-        with patch("autodocs.src.checkpoint.asyncio.to_thread") as mock_to_thread:
-            mock_to_thread.return_value = None
-            await delete_autodocs_checkpoint("test-bucket", "test-svn", mock_s3)
-
-            mock_to_thread.assert_called_once()
-            assert mock_to_thread.call_args[0][0].__name__ == "_delete_checkpoint_sync"
-
-
 class TestAnnotationsListTupleCompatibility:
     """Tests for JSON list/tuple serialization compatibility."""
 
@@ -667,3 +533,284 @@ class TestAnnotationsListTupleCompatibility:
 
         # Note: JSON keys become strings, need to handle that
         assert "doc.pdf" in restored.pdf_annotations
+
+
+class TestCheckpointStateMutation:
+    """Tests for checkpoint state mutation methods."""
+
+    def test_update_phase_mutates_state(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.INITIALIZING,
+        )
+
+        checkpoint.update_phase(AutoDocsPhase.ANNOTATING, current=50, total=100)
+
+        assert checkpoint.current_phase == AutoDocsPhase.ANNOTATING
+        assert checkpoint.phase_current == 50
+        assert checkpoint.phase_total == 100
+
+    def test_update_annotations_converts_integers(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.ANNOTATING,
+        )
+
+        # Simulate Category enums as IntEnum values (represented as ints here)
+        annotations = {"src/main.py": [1, 2, 0], "src/utils.py": [0, 1, 2]}
+        pdf_annotations = {"doc.pdf": {0: [1, 2], 1: [0, 1]}}
+
+        checkpoint.update_annotations(annotations, pdf_annotations)
+
+        assert checkpoint.annotations == {
+            "src/main.py": [1, 2, 0],
+            "src/utils.py": [0, 1, 2],
+        }
+        assert checkpoint.pdf_annotations == {"doc.pdf": {0: [1, 2], 1: [0, 1]}}
+
+    def test_update_sections(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.SECTION_UPDATE,
+        )
+
+        sections = [{"order_idx": 0, "title": "Overview", "content": "Content"}]
+        init_nodes = {"src/main.py", "src/utils.py"}
+
+        checkpoint.update_sections(sections, init_nodes)
+
+        assert checkpoint.sections_content == sections
+        assert set(checkpoint.init_node_set) == init_nodes
+
+    def test_update_scatter_state(self):
+        from autodocs.src.checkpoint import (
+            AutoDocsCheckpoint,
+            AutoDocsPhase,
+            ScatterState,
+        )
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.SECTION_UPDATE,
+        )
+
+        state = ScatterState(
+            file_by_file_content={"src/a.py": "content"},
+            nodes_processed=10,
+            nodes_total=100,
+        )
+        checkpoint.update_scatter_state("Architecture", state)
+
+        assert checkpoint.scatter_state["Architecture"] == state
+
+    def test_update_topo_index(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.SECTION_UPDATE,
+        )
+
+        checkpoint.update_topo_index(42)
+
+        assert checkpoint.current_topo_index == 42
+
+    def test_update_pdf_index(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.UPDATING_PDFS,
+        )
+
+        checkpoint.update_pdf_index(5)
+
+        assert checkpoint.current_pdf_index == 5
+
+
+class TestCheckpointFactory:
+    """Tests for checkpoint factory methods."""
+
+    def test_create_initial_factory(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint.create_initial(
+            source_version_node_id="test-svn-123",
+            hatchet_id="hatchet-456",
+            toml_content="[document]\ngoal = 'test'",
+            config_hash="hash123",
+            use_tagging=True,
+            appended_reverse_topo_paths=["src/a.py", "src/b.py"],
+        )
+
+        assert checkpoint.source_version_node_id == "test-svn-123"
+        assert checkpoint.hatchet_id == "hatchet-456"
+        assert checkpoint.toml_content == "[document]\ngoal = 'test'"
+        assert checkpoint.config_hash == "hash123"
+        assert checkpoint.use_tagging is True
+        assert checkpoint.current_phase == AutoDocsPhase.INITIALIZING
+        assert checkpoint.appended_reverse_topo_paths == ["src/a.py", "src/b.py"]
+
+
+class TestCheckpointPersistenceMethods:
+    """Tests for checkpoint persistence methods (save/delete/load_for_resume)."""
+
+    @pytest.mark.asyncio
+    async def test_save_calls_upload(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.ANNOTATING,
+        )
+
+        mock_s3 = MagicMock()
+
+        with patch("autodocs.src.checkpoint.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = None
+            await checkpoint.save("test-bucket", mock_s3)
+
+            mock_to_thread.assert_called_once()
+            assert mock_to_thread.call_args[0][0].__name__ == "_upload_checkpoint_sync"
+
+    @pytest.mark.asyncio
+    async def test_delete_calls_delete(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+        checkpoint = AutoDocsCheckpoint(
+            source_version_node_id="test-svn-uuid",
+            config_hash="abc123",
+            toml_content="",
+            started_at=datetime.now(UTC),
+            current_phase=AutoDocsPhase.ANNOTATING,
+        )
+
+        mock_s3 = MagicMock()
+
+        with patch("autodocs.src.checkpoint.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = None
+            await checkpoint.delete("test-bucket", mock_s3)
+
+            mock_to_thread.assert_called_once()
+            assert mock_to_thread.call_args[0][0].__name__ == "_delete_checkpoint_sync"
+
+    @pytest.mark.asyncio
+    async def test_load_for_resume_returns_valid_checkpoint(self):
+        from autodocs.src.checkpoint import (
+            AUTODOCS_CHECKPOINT_VERSION,
+            AutoDocsCheckpoint,
+            AutoDocsPhase,
+        )
+
+        checkpoint_data = {
+            "version": AUTODOCS_CHECKPOINT_VERSION,
+            "source_version_node_id": "test-svn",
+            "config_hash": "abc123",
+            "toml_content": "[doc]",
+            "started_at": "2024-01-15T10:30:00Z",
+            "last_updated_at": "2024-01-15T11:00:00Z",
+            "current_phase": "annotating",
+            "phase_current": 50,
+            "phase_total": 100,
+            "use_tagging": True,
+        }
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: json.dumps(checkpoint_data).encode())
+        }
+
+        with patch("autodocs.src.checkpoint.boto3.client", return_value=mock_s3):
+            result = await AutoDocsCheckpoint.load_for_resume(
+                bucket="test-bucket",
+                svn_id="test-svn",
+                config_hash="abc123",
+                use_tagging=True,
+                s3_client=mock_s3,
+            )
+
+        assert result is not None
+        assert result.source_version_node_id == "test-svn"
+        assert result.current_phase == AutoDocsPhase.ANNOTATING
+
+    @pytest.mark.asyncio
+    async def test_load_for_resume_returns_none_on_config_mismatch(self):
+        from autodocs.src.checkpoint import (
+            AUTODOCS_CHECKPOINT_VERSION,
+            AutoDocsCheckpoint,
+        )
+
+        checkpoint_data = {
+            "version": AUTODOCS_CHECKPOINT_VERSION,
+            "source_version_node_id": "test-svn",
+            "config_hash": "old_hash",
+            "toml_content": "[doc]",
+            "started_at": "2024-01-15T10:30:00Z",
+            "last_updated_at": "2024-01-15T11:00:00Z",
+            "current_phase": "annotating",
+            "phase_current": 50,
+            "phase_total": 100,
+            "use_tagging": True,
+        }
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: json.dumps(checkpoint_data).encode())
+        }
+
+        result = await AutoDocsCheckpoint.load_for_resume(
+            bucket="test-bucket",
+            svn_id="test-svn",
+            config_hash="new_hash",  # Different hash
+            use_tagging=True,
+            s3_client=mock_s3,
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_load_for_resume_returns_none_when_not_found(self):
+        from autodocs.src.checkpoint import AutoDocsCheckpoint
+        from botocore.exceptions import ClientError
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey"}}, "GetObject"
+        )
+
+        result = await AutoDocsCheckpoint.load_for_resume(
+            bucket="test-bucket",
+            svn_id="nonexistent",
+            config_hash="abc123",
+            use_tagging=True,
+            s3_client=mock_s3,
+        )
+
+        assert result is None
