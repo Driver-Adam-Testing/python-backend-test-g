@@ -8,10 +8,6 @@ The tests verify the full checkpoint lifecycle against real S3-compatible storag
 - Download and verify checkpoint
 - Delete checkpoint
 - Verify deletion
-
-Skip conditions:
-- MinIO not running on localhost:9000
-- AWS_S3_ENDPOINT_URL not set to MinIO endpoint
 """
 
 import os
@@ -42,6 +38,13 @@ def is_minio_available() -> bool:
         return True
     except (EndpointConnectionError, ClientError, Exception):
         return False
+
+
+# Skip all tests in this module if MinIO is not available
+pytestmark = pytest.mark.skipif(
+    not is_minio_available(),
+    reason="MinIO not available - start with 'docker-compose up minio'",
+)
 
 
 @pytest.fixture(scope="module")
@@ -106,18 +109,18 @@ async def test_checkpoint_roundtrip_s3(minio_client):
     """Verify checkpoint can be saved, loaded, and deleted from S3.
 
     This is the key integration test that validates:
-    1. Async wrappers work correctly with real S3
+    1. Checkpoint methods work correctly with real S3
     2. Checkpoint serialization survives S3 storage
     3. All checkpoint fields are preserved through roundtrip
     4. Delete actually removes the checkpoint
     """
+    import asyncio
+
     from autodocs.src.checkpoint import (
         AutoDocsCheckpoint,
         AutoDocsPhase,
         ScatterState,
-        delete_autodocs_checkpoint,
-        download_autodocs_checkpoint,
-        upload_autodocs_checkpoint,
+        _download_checkpoint_sync,
     )
 
     # Create a checkpoint with representative data
@@ -155,11 +158,13 @@ instruction = "Describe the system architecture"
         scatter_state=scatter_state,
     )
 
-    # Upload checkpoint to MinIO
-    await upload_autodocs_checkpoint(checkpoint, TEST_BUCKET, minio_client)
+    # Save checkpoint to MinIO using method
+    await checkpoint.save(TEST_BUCKET, minio_client)
 
-    # Download and verify
-    downloaded = await download_autodocs_checkpoint(TEST_BUCKET, svn_id, minio_client)
+    # Download and verify (use internal function for raw download)
+    downloaded = await asyncio.to_thread(
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
+    )
 
     assert downloaded is not None, "Checkpoint should be downloaded"
     assert downloaded.source_version_node_id == svn_id
@@ -183,12 +188,12 @@ instruction = "Describe the system architecture"
         == "Generated content for main.py"
     )
 
-    # Delete checkpoint
-    await delete_autodocs_checkpoint(TEST_BUCKET, svn_id, minio_client)
+    # Delete checkpoint using method
+    await checkpoint.delete(TEST_BUCKET, minio_client)
 
     # Verify deletion - should return None
-    deleted_check = await download_autodocs_checkpoint(
-        TEST_BUCKET, svn_id, minio_client
+    deleted_check = await asyncio.to_thread(
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
     )
     assert deleted_check is None, "Checkpoint should be deleted"
 
@@ -197,10 +202,12 @@ instruction = "Describe the system architecture"
 @pytest.mark.asyncio
 async def test_checkpoint_download_missing_returns_none(minio_client):
     """Downloading non-existent checkpoint should return None, not raise."""
-    from autodocs.src.checkpoint import download_autodocs_checkpoint
+    import asyncio
 
-    result = await download_autodocs_checkpoint(
-        TEST_BUCKET, "nonexistent-svn-id-xyz", minio_client
+    from autodocs.src.checkpoint import _download_checkpoint_sync
+
+    result = await asyncio.to_thread(
+        _download_checkpoint_sync, TEST_BUCKET, "nonexistent-svn-id-xyz", minio_client
     )
 
     assert result is None
@@ -210,24 +217,31 @@ async def test_checkpoint_download_missing_returns_none(minio_client):
 @pytest.mark.asyncio
 async def test_checkpoint_delete_nonexistent_succeeds(minio_client):
     """Deleting non-existent checkpoint should not raise an error."""
-    from autodocs.src.checkpoint import delete_autodocs_checkpoint
+    from autodocs.src.checkpoint import AutoDocsCheckpoint, AutoDocsPhase
+
+    # Create a dummy checkpoint to get access to delete method
+    dummy = AutoDocsCheckpoint(
+        source_version_node_id="nonexistent-svn-id-for-delete",
+        config_hash="dummy",
+        toml_content="dummy",
+        started_at=datetime.now(UTC),
+        current_phase=AutoDocsPhase.INITIALIZING,
+    )
 
     # This should not raise - S3 delete_object is idempotent
-    await delete_autodocs_checkpoint(
-        TEST_BUCKET, "nonexistent-svn-id-for-delete", minio_client
-    )
+    await dummy.delete(TEST_BUCKET, minio_client)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_checkpoint_overwrite(minio_client):
-    """Uploading checkpoint twice should overwrite, not create duplicates."""
+    """Saving checkpoint twice should overwrite, not create duplicates."""
+    import asyncio
+
     from autodocs.src.checkpoint import (
         AutoDocsCheckpoint,
         AutoDocsPhase,
-        delete_autodocs_checkpoint,
-        download_autodocs_checkpoint,
-        upload_autodocs_checkpoint,
+        _download_checkpoint_sync,
     )
 
     svn_id = "overwrite-test-svn"
@@ -242,9 +256,9 @@ async def test_checkpoint_overwrite(minio_client):
         phase_current=10,
         phase_total=100,
     )
-    await upload_autodocs_checkpoint(checkpoint_v1, TEST_BUCKET, minio_client)
+    await checkpoint_v1.save(TEST_BUCKET, minio_client)
 
-    # Upload second checkpoint (same svn_id, different data)
+    # Save second checkpoint (same svn_id, different data)
     checkpoint_v2 = AutoDocsCheckpoint(
         source_version_node_id=svn_id,
         config_hash="hash_v2",
@@ -254,10 +268,12 @@ async def test_checkpoint_overwrite(minio_client):
         phase_current=75,
         phase_total=100,
     )
-    await upload_autodocs_checkpoint(checkpoint_v2, TEST_BUCKET, minio_client)
+    await checkpoint_v2.save(TEST_BUCKET, minio_client)
 
     # Download should get v2
-    downloaded = await download_autodocs_checkpoint(TEST_BUCKET, svn_id, minio_client)
+    downloaded = await asyncio.to_thread(
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
+    )
 
     assert downloaded is not None
     assert downloaded.config_hash == "hash_v2"
@@ -266,4 +282,4 @@ async def test_checkpoint_overwrite(minio_client):
     assert downloaded.phase_current == 75
 
     # Cleanup
-    await delete_autodocs_checkpoint(TEST_BUCKET, svn_id, minio_client)
+    await checkpoint_v2.delete(TEST_BUCKET, minio_client)
