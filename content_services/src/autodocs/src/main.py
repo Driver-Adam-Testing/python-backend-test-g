@@ -24,7 +24,6 @@ from .autodocs_prototype import (
 )
 from .checkpoint import (
     AutoDocsCheckpoint,
-    AutoDocsPhase,
     _download_checkpoint_sync,
     compute_config_hash,
 )
@@ -229,6 +228,9 @@ async def run_autodoc(
                         config_hash=config_hash,
                         use_tagging=config.document.use_tagging,
                     )
+                    # Save checkpoint immediately after creation to preserve TOML content
+                    # This ensures we can resume with the same sections even if task fails early
+                    await checkpoint.save(bucket)
             case _:
                 raise ValueError(f"Unsupported config kind: {config_kind}")
 
@@ -277,6 +279,8 @@ async def run_autodoc(
                     config_hash=config_hash,
                     use_tagging=use_tagging,
                 )
+                # Save checkpoint immediately after creation to preserve TOML content
+                await checkpoint.save(bucket)
 
         init_state = await AutoDocInitState.from_cfg(
             cfg=config,
@@ -284,17 +288,17 @@ async def run_autodoc(
             page_version_node_id=version_node_id,
         )
 
-        # Determine if we're resuming from an existing checkpoint
-        resume = checkpoint.current_phase != AutoDocsPhase.INITIALIZING
-
+        # Note: The `resume` parameter is for legacy local file-based resume only.
+        # S3 checkpoint resume is handled via the `checkpoint` parameter.
         doc = await init_state.generate(
             execution_mode=ExecutionMode.MODAL,
             checkpoint=checkpoint,
             bucket=bucket,
-            resume=resume,
+            resume=False,  # Legacy local resume disabled; S3 checkpoint handles resume
             source_version_node_id=str(version_node_id),
             hatchet_id=hatchet_id,
         )
+
         elapsed_time_s = await get_autodoc_elapsed_time(
             source_version_node_id=str(version_node_id), hatchet_id=hatchet_id
         )
