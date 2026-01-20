@@ -1729,10 +1729,12 @@ class AutoDocCfg(BaseModel):
     sections: list[SectionCfg]
 
     @classmethod
-    def from_file(cls, toml_file: str) -> Self:
-        with open(toml_file, "rb") as f:
-            raw_data = tomllib.load(f)
+    def _apply_defaults_and_validate(cls, raw_data: dict) -> Self:
+        """Apply default values and validate the config.
 
+        This is the shared implementation for from_file() and from_string().
+        AutoTOML generates minimal TOML that relies on defaults being applied.
+        """
         llm_raw_default = LlmCfg.default().model_dump()
         if "llm" in raw_data:
             raw_data["llm"] = {**llm_raw_default, **raw_data["llm"]}
@@ -1782,18 +1784,20 @@ class AutoDocCfg(BaseModel):
         return cfg
 
     @classmethod
+    def from_file(cls, toml_file: str) -> Self:
+        with open(toml_file, "rb") as f:
+            raw_data = tomllib.load(f)
+        return cls._apply_defaults_and_validate(raw_data)
+
+    @classmethod
     def from_string(cls, toml_content: str) -> Self:
         """Load config from a TOML string.
 
-        Unlike from_file(), this method does NOT apply default merging.
-        It's designed for loading configs that were previously serialized
-        by AutoTOML (which generates complete, schema-compliant TOML).
-
-        Use from_file() for user-provided TOML that may have missing fields.
-        Use from_string() for checkpoint restoration where we control the content.
+        Applies the same default merging as from_file() since AutoTOML
+        generates minimal TOML that relies on defaults being applied.
         """
         raw_data = tomllib.loads(toml_content)
-        return cls.model_validate(raw_data)
+        return cls._apply_defaults_and_validate(raw_data)
 
     async def eval_optional_sections(
         self, llm: ChatOpenAI, long_descriptions: str
