@@ -65,6 +65,8 @@ async def run_autodoc(
 
     is_page = content_kind == ContentKind.application_note or content_kind is None
 
+    content_kind_str = content_kind if content_kind else "application_note"
+
     toml_content = ""
 
     if config_kind == AutoDocConfigKind.FROM_DOCUMENT_GOAL and not document_goal:
@@ -185,7 +187,11 @@ async def run_autodoc(
                 # First pass: try to load checkpoint with any config (we don't know config_hash yet)
                 # We need to check if TOML content exists to decide whether to run AutoTOML
                 raw_checkpoint = await asyncio.to_thread(
-                    _download_checkpoint_sync, bucket, str(version_node_id), None
+                    _download_checkpoint_sync,
+                    bucket,
+                    str(version_node_id),
+                    content_kind_str,
+                    None,
                 )
 
                 if raw_checkpoint and raw_checkpoint.toml_content:
@@ -223,6 +229,7 @@ async def run_autodoc(
                     config_hash = compute_config_hash(toml_content)
                     checkpoint = AutoDocsCheckpoint.create_initial(
                         source_version_node_id=str(version_node_id),
+                        content_kind=content_kind_str,
                         hatchet_id=hatchet_id,
                         toml_content=toml_content,
                         config_hash=config_hash,
@@ -257,6 +264,7 @@ async def run_autodoc(
             checkpoint = await AutoDocsCheckpoint.load_for_resume(
                 bucket=bucket,
                 svn_id=str(version_node_id),
+                content_kind=content_kind_str,
                 config_hash=config_hash,
                 use_tagging=use_tagging,
             )
@@ -274,6 +282,7 @@ async def run_autodoc(
             else:
                 checkpoint = AutoDocsCheckpoint.create_initial(
                     source_version_node_id=str(version_node_id),
+                    content_kind=content_kind_str,
                     hatchet_id=hatchet_id,
                     toml_content=toml_content,
                     config_hash=config_hash,

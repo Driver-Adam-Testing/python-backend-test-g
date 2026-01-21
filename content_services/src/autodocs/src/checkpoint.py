@@ -86,6 +86,9 @@ class AutoDocsCheckpoint(BaseModel):
 
     # Identity
     source_version_node_id: str
+    content_kind: (
+        str  # e.g. "application_note" - part of checkpoint key to avoid collisions
+    )
     hatchet_id: str | None = None
     config_hash: str  # Hash of TOML config for validation
     toml_content: (
@@ -228,7 +231,11 @@ class AutoDocsCheckpoint(BaseModel):
 
     async def delete(self, bucket: str, s3_client: Any = None) -> None:
         await asyncio.to_thread(
-            _delete_checkpoint_sync, bucket, self.source_version_node_id, s3_client
+            _delete_checkpoint_sync,
+            bucket,
+            self.source_version_node_id,
+            self.content_kind,
+            s3_client,
         )
 
     # === Factory/Loading ===
@@ -238,13 +245,14 @@ class AutoDocsCheckpoint(BaseModel):
         cls,
         bucket: str,
         svn_id: str,
+        content_kind: str,
         config_hash: str,
         use_tagging: bool,
         s3_client: Any = None,
     ) -> Self | None:
         """Load and validate checkpoint in one step. Returns None if not found or invalid."""
         checkpoint = await asyncio.to_thread(
-            _download_checkpoint_sync, bucket, svn_id, s3_client
+            _download_checkpoint_sync, bucket, svn_id, content_kind, s3_client
         )
 
         if checkpoint is None:
@@ -260,6 +268,7 @@ class AutoDocsCheckpoint(BaseModel):
     def create_initial(
         cls,
         source_version_node_id: str,
+        content_kind: str,
         hatchet_id: str | None,
         toml_content: str,
         config_hash: str,
@@ -268,6 +277,7 @@ class AutoDocsCheckpoint(BaseModel):
     ) -> Self:
         return cls(
             source_version_node_id=source_version_node_id,
+            content_kind=content_kind,
             hatchet_id=hatchet_id,
             config_hash=config_hash,
             toml_content=toml_content,
@@ -290,9 +300,13 @@ def compute_config_hash(toml_content: str) -> str:
     return hashlib.sha256(toml_content.encode("utf-8")).hexdigest()[:16]
 
 
-def _get_autodocs_checkpoint_key(source_version_node_id: str) -> str:
-    """Get the S3 key for an autodocs checkpoint."""
-    return f"autodocs/{source_version_node_id}/checkpoint.json"
+def _get_autodocs_checkpoint_key(source_version_node_id: str, content_kind: str) -> str:
+    """Get the S3 key for an autodocs checkpoint.
+
+    The key includes content_kind to avoid collisions when multiple autodoc types
+    (e.g., application_note, LONG_DESCRIPTION) are generated for the same version node.
+    """
+    return f"autodocs/{source_version_node_id}/{content_kind}/checkpoint.json"
 
 
 # =============================================================================
@@ -310,7 +324,9 @@ def _upload_checkpoint_sync(
             "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
         )
 
-    key = _get_autodocs_checkpoint_key(checkpoint.source_version_node_id)
+    key = _get_autodocs_checkpoint_key(
+        checkpoint.source_version_node_id, checkpoint.content_kind
+    )
     body = checkpoint.model_dump_json().encode("utf-8")
 
     logger.info(
@@ -328,6 +344,7 @@ def _upload_checkpoint_sync(
 def _download_checkpoint_sync(
     bucket: str,
     source_version_node_id: str,
+    content_kind: str,
     s3_client: Any = None,
 ) -> AutoDocsCheckpoint | None:
     if s3_client is None:
@@ -335,7 +352,7 @@ def _download_checkpoint_sync(
             "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
         )
 
-    key = _get_autodocs_checkpoint_key(source_version_node_id)
+    key = _get_autodocs_checkpoint_key(source_version_node_id, content_kind)
 
     # Fetch from S3
     try:
@@ -376,6 +393,7 @@ def _download_checkpoint_sync(
 def _delete_checkpoint_sync(
     bucket: str,
     source_version_node_id: str,
+    content_kind: str,
     s3_client: Any = None,
 ) -> None:
     """Delete checkpoint from S3 (sync version for use with asyncio.to_thread).
@@ -386,6 +404,7 @@ def _delete_checkpoint_sync(
     Args:
         bucket: S3 bucket name
         source_version_node_id: ID to delete checkpoint for
+        content_kind: The content kind (e.g., "application_note")
         s3_client: Optional boto3 S3 client (for testing)
     """
     if s3_client is None:
@@ -393,7 +412,7 @@ def _delete_checkpoint_sync(
             "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
         )
 
-    key = _get_autodocs_checkpoint_key(source_version_node_id)
+    key = _get_autodocs_checkpoint_key(source_version_node_id, content_kind)
     logger.info(f"Deleting autodocs checkpoint at s3://{bucket}/{key}")
     s3_client.delete_object(Bucket=bucket, Key=key)
 
