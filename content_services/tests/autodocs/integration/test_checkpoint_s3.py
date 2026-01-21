@@ -145,8 +145,10 @@ instruction = "Describe the system architecture"
         )
     }
 
+    content_kind = "application_note"
     checkpoint = AutoDocsCheckpoint(
         source_version_node_id=svn_id,
+        content_kind=content_kind,
         config_hash="abc123def456gh",
         toml_content=toml_content,
         started_at=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
@@ -163,7 +165,7 @@ instruction = "Describe the system architecture"
 
     # Download and verify (use internal function for raw download)
     downloaded = await asyncio.to_thread(
-        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, content_kind, minio_client
     )
 
     assert downloaded is not None, "Checkpoint should be downloaded"
@@ -193,7 +195,7 @@ instruction = "Describe the system architecture"
 
     # Verify deletion - should return None
     deleted_check = await asyncio.to_thread(
-        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, content_kind, minio_client
     )
     assert deleted_check is None, "Checkpoint should be deleted"
 
@@ -207,7 +209,11 @@ async def test_checkpoint_download_missing_returns_none(minio_client):
     from autodocs.src.checkpoint import _download_checkpoint_sync
 
     result = await asyncio.to_thread(
-        _download_checkpoint_sync, TEST_BUCKET, "nonexistent-svn-id-xyz", minio_client
+        _download_checkpoint_sync,
+        TEST_BUCKET,
+        "nonexistent-svn-id-xyz",
+        "application_note",
+        minio_client,
     )
 
     assert result is None
@@ -222,6 +228,7 @@ async def test_checkpoint_delete_nonexistent_succeeds(minio_client):
     # Create a dummy checkpoint to get access to delete method
     dummy = AutoDocsCheckpoint(
         source_version_node_id="nonexistent-svn-id-for-delete",
+        content_kind="application_note",
         config_hash="dummy",
         toml_content="dummy",
         started_at=datetime.now(UTC),
@@ -245,10 +252,12 @@ async def test_checkpoint_overwrite(minio_client):
     )
 
     svn_id = "overwrite-test-svn"
+    content_kind = "application_note"
 
     # Create first checkpoint
     checkpoint_v1 = AutoDocsCheckpoint(
         source_version_node_id=svn_id,
+        content_kind=content_kind,
         config_hash="hash_v1",
         toml_content="version 1",
         started_at=datetime.now(UTC),
@@ -258,9 +267,10 @@ async def test_checkpoint_overwrite(minio_client):
     )
     await checkpoint_v1.save(TEST_BUCKET, minio_client)
 
-    # Save second checkpoint (same svn_id, different data)
+    # Save second checkpoint (same svn_id and content_kind, different data)
     checkpoint_v2 = AutoDocsCheckpoint(
         source_version_node_id=svn_id,
+        content_kind=content_kind,
         config_hash="hash_v2",
         toml_content="version 2",
         started_at=datetime.now(UTC),
@@ -272,7 +282,7 @@ async def test_checkpoint_overwrite(minio_client):
 
     # Download should get v2
     downloaded = await asyncio.to_thread(
-        _download_checkpoint_sync, TEST_BUCKET, svn_id, minio_client
+        _download_checkpoint_sync, TEST_BUCKET, svn_id, content_kind, minio_client
     )
 
     assert downloaded is not None
