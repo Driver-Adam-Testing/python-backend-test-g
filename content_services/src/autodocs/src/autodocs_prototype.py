@@ -3043,7 +3043,8 @@ Your output is the full content of the document with editing updates based on yo
                         current=pidx,
                         total=len(appended_reverse_topo),
                     )
-                    checkpoint.update_annotations(annotations, pdf_annotations)
+                    if annotations is not None:
+                        checkpoint.update_annotations(annotations, pdf_annotations)
                     checkpoint.update_sections(section_state["sections"], init_node_set)
                     checkpoint.update_topo_index(pidx)
                     await checkpoint.save(bucket)
@@ -3235,7 +3236,8 @@ Your output is the full content of the document with editing updates based on yo
                 current=pidx,
                 total=len(appended_reverse_topo),
             )
-            checkpoint.update_annotations(annotations, pdf_annotations)
+            if annotations is not None:
+                checkpoint.update_annotations(annotations, pdf_annotations)
             checkpoint.update_sections(section_state["sections"], init_node_set)
             checkpoint.update_topo_index(pidx)
             await checkpoint.save(bucket)
