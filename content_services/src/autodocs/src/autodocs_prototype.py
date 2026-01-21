@@ -3208,6 +3208,11 @@ Your output is the full content of the document with editing updates based on yo
             # Get existing scatter state from checkpoint for resume
             existing_scatter_state = checkpoint.scatter_state
 
+            # Save annotations to checkpoint BEFORE scatter starts, so scatter
+            # checkpoints preserve them (scatter saves don't call update_annotations)
+            if annotations is not None:
+                checkpoint.update_annotations(annotations, pdf_annotations)
+
             init_node_set, sections_init = await self._initialize_sections(
                 llm=llm_section_init,
                 reverse_topos_from_start=reverse_topos,
@@ -3304,7 +3309,9 @@ Your output is the full content of the document with editing updates based on yo
                         previous_state=section_state["sections"],
                         pdf_path=pdf_path,
                         pdf_pages=pdf_pages_dict[pdf_path],
-                        pdf_annotations=pdf_annotations[pdf_path],
+                        pdf_annotations=pdf_annotations[pdf_path]
+                        if pdf_annotations
+                        else None,
                     )
                     pidx += 1
                     new_section_state["sections"] = section_update
