@@ -256,7 +256,9 @@ class TechDocsContent(BaseModel):
 class DriverDocsContent(BaseModel):
     codebase_name: str
     version_id: str
-    dag: dict[str, set[str]]
+    dag: dict[
+        str, list[str]
+    ]  # Children sorted alphabetically for deterministic ordering
     content: dict[str, TechDocsContent]
     topo_order: list[str]
 
@@ -311,7 +313,11 @@ class DriverDocsContent(BaseModel):
             try:
                 # Parallelize S3 downloads using ThreadPoolExecutor
                 content = {}
-                s3_client = boto3.client("s3", config=Config(max_pool_connections=50))
+                s3_client = boto3.client(
+                    "s3",
+                    endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"),
+                    config=Config(max_pool_connections=50),
+                )
                 with ThreadPoolExecutor(max_workers=10) as executor:
                     # Submit all download tasks
                     future_to_key = {
@@ -507,7 +513,7 @@ def _download_pdf_from_s3(version_id: str) -> str:
     download_dir.mkdir(exist_ok=True)
     local_download_path = download_dir / pdf_name
 
-    s3_client = boto3.client("s3")
+    s3_client = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
     download_key = f"{primary_asset_id}/{version_id}/{version_node.relative_path}"
     s3_client.download_file(bucket, download_key, str(local_download_path))
 
@@ -517,29 +523,30 @@ def build_file_tree_dag(
     content: dict[str, TechDocsContent],
     codebase_root: str | None,
     exeuction_mode: ExecutionMode,
-) -> dict[str, set[str]]:
+) -> dict[str, list[str]]:
     if exeuction_mode == ExecutionMode.LOCAL and codebase_root is None:
         codebase_root = Path(LOCAL_FILES[codebase_name]["abs_path_of_root_loc"])
     elif codebase_root is not None:
         codebase_root = Path(codebase_root)
     included_nodes = {str(k) for k in content}
-    dag = dict()
+    dag: dict[str, list[str]] = {}
 
     for (
         local_root,
         dirs,
         files,
     ) in os.walk(codebase_root / codebase_name):
-        children = set()
-        for d in dirs:
+        children: list[str] = []
+        # Sort dirs and files for deterministic ordering
+        for d in sorted(dirs):
             root_rel_path = str((Path(local_root) / d).relative_to(codebase_root))
             if root_rel_path in included_nodes:
-                children.add(root_rel_path)
-        for f in files:
+                children.append(root_rel_path)
+        for f in sorted(files):
             root_rel_path = str((Path(local_root) / f).relative_to(codebase_root))
             if root_rel_path in included_nodes:
-                dag[root_rel_path] = set()
-                children.add(root_rel_path)
+                dag[root_rel_path] = []
+                children.append(root_rel_path)
         local_root_rel_path = str(Path(local_root).relative_to(codebase_root))
         if local_root_rel_path in included_nodes:
             dag[local_root_rel_path] = children
@@ -547,20 +554,20 @@ def build_file_tree_dag(
     return dag
 
 
-def build_subgraph(dag: dict[str, set[str]], start: str) -> dict[str, set[str]] | None:
+def build_subgraph(
+    dag: dict[str, list[str]], start: str
+) -> dict[str, list[str]] | None:
     if start not in dag:
         print(f"Node {start} is not present in the DAG.")
         return None
 
-    subgraph = dict()
+    subgraph: dict[str, list[str]] = {}
 
     def dfs(node: str) -> None:
         if node in subgraph:
-            # We've already visited this node.
             return
-        # Add the node to the subgraph with a copy of its children.
         subgraph[node] = dag[node]
-        for child in dag[node]:
+        for child in dag[node]:  # Already sorted from build_file_tree_dag
             dfs(child)
 
     dfs(start)
@@ -2315,7 +2322,7 @@ Your output is the full content of the document with editing updates based on yo
         self,
         llm: ChatOpenAI,
         topo: list[tuple[str, TechDocsContent]],
-        graph: dict[str, set[str]],
+        graph: dict[str, list[str]],
         execution_mode: ExecutionMode,
         pdf_pages_dict: dict[str, list[str]],
         checkpoint: AutoDocsCheckpoint,
@@ -2385,6 +2392,10 @@ Your output is the full content of the document with editing updates based on yo
                         node_list.append(Category.Irrelevant)
                 tagged_nodes[p] = node_list
 
+        # Save checkpoint after folder annotations (before PDFs)
+        checkpoint.update_annotations(tagged_nodes)
+        await checkpoint.save(bucket)
+
         if len(self.scope.pdfs) > 0:
             print(
                 f"\n({BLUE}{llm.model}{RESET}) Annotating PDFs for relevance to sections..."
@@ -2404,6 +2415,10 @@ Your output is the full content of the document with editing updates based on yo
                 pdf_results = await tqdm_asyncio.gather(*coroutines)
                 for result in pdf_results:
                     tagged_pdfs[pdf_path][result[0]] = result[1]
+
+            # Save checkpoint after PDF annotations
+            checkpoint.update_annotations(tagged_nodes, tagged_pdfs)
+            await checkpoint.save(bucket)
 
         return tagged_nodes, tagged_pdfs
 

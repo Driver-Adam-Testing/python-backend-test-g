@@ -25,6 +25,7 @@ class TestAutoDocsCheckpoint:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test-svn-123",
+            content_kind="application_note",
             config_hash="abc123def456",
             toml_content="[document]\ngoal = 'test'",
             started_at=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
@@ -62,6 +63,7 @@ class TestAutoDocsCheckpoint:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -78,6 +80,7 @@ class TestAutoDocsCheckpoint:
         before = datetime.now(UTC)
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -103,6 +106,7 @@ class TestAutoDocsCheckpoint:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -136,6 +140,7 @@ class TestAutoDocsCheckpoint:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -157,6 +162,7 @@ class TestAutoDocsCheckpoint:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -188,6 +194,7 @@ instruction = "Describe the system"
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content=toml_content,
             started_at=datetime.now(UTC),
@@ -251,6 +258,7 @@ class TestCheckpointValidation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash=config_hash,
             toml_content=toml,
             started_at=datetime.now(UTC),
@@ -266,6 +274,7 @@ class TestCheckpointValidation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="old_hash_12345",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -283,6 +292,7 @@ class TestCheckpointValidation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -331,6 +341,7 @@ class TestCheckpointS3Storage:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -343,7 +354,10 @@ class TestCheckpointS3Storage:
         mock_s3.put_object.assert_called_once()
         call_kwargs = mock_s3.put_object.call_args.kwargs
         assert call_kwargs["Bucket"] == "test-bucket"
-        assert call_kwargs["Key"] == "autodocs/test-svn-uuid/checkpoint.json"
+        assert (
+            call_kwargs["Key"]
+            == "autodocs/test-svn-uuid/application_note/checkpoint.json"
+        )
         assert call_kwargs["ContentType"] == "application/json"
 
     def test_upload_checkpoint_writes_valid_json(self):
@@ -356,6 +370,7 @@ class TestCheckpointS3Storage:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="[doc]\ngoal='test'",
             started_at=datetime.now(UTC),
@@ -386,6 +401,7 @@ class TestCheckpointS3Storage:
         checkpoint_data = {
             "version": AUTODOCS_CHECKPOINT_VERSION,
             "source_version_node_id": "test-svn-uuid",
+            "content_kind": "application_note",
             "config_hash": "abc123",
             "toml_content": "",
             "started_at": "2024-01-15T10:30:00Z",
@@ -404,6 +420,7 @@ class TestCheckpointS3Storage:
         result = _download_checkpoint_sync(
             bucket="test-bucket",
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             s3_client=mock_s3,
         )
 
@@ -425,6 +442,7 @@ class TestCheckpointS3Storage:
         result = _download_checkpoint_sync(
             bucket="test-bucket",
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             s3_client=mock_s3,
         )
 
@@ -442,6 +460,7 @@ class TestCheckpointS3Storage:
         result = _download_checkpoint_sync(
             bucket="test-bucket",
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             s3_client=mock_s3,
         )
 
@@ -454,6 +473,7 @@ class TestCheckpointS3Storage:
         checkpoint_data = {
             "version": "0.1",  # Old version
             "source_version_node_id": "test",
+            "content_kind": "application_note",
         }
 
         mock_s3 = MagicMock()
@@ -462,7 +482,10 @@ class TestCheckpointS3Storage:
         }
 
         result = _download_checkpoint_sync(
-            bucket="test-bucket", source_version_node_id="test", s3_client=mock_s3
+            bucket="test-bucket",
+            source_version_node_id="test",
+            content_kind="application_note",
+            s3_client=mock_s3,
         )
 
         assert result is None
@@ -475,11 +498,13 @@ class TestCheckpointS3Storage:
         _delete_checkpoint_sync(
             bucket="test-bucket",
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             s3_client=mock_s3,
         )
 
         mock_s3.delete_object.assert_called_once_with(
-            Bucket="test-bucket", Key="autodocs/test-svn-uuid/checkpoint.json"
+            Bucket="test-bucket",
+            Key="autodocs/test-svn-uuid/application_note/checkpoint.json",
         )
 
 
@@ -493,6 +518,7 @@ class TestAnnotationsListTupleCompatibility:
         # JSON deserializes tuples as lists
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -516,6 +542,7 @@ class TestAnnotationsListTupleCompatibility:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -543,6 +570,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -560,6 +588,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -583,6 +612,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -606,6 +636,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -626,6 +657,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -641,6 +673,7 @@ class TestCheckpointStateMutation:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -660,6 +693,7 @@ class TestCheckpointFactory:
 
         checkpoint = AutoDocsCheckpoint.create_initial(
             source_version_node_id="test-svn-123",
+            content_kind="application_note",
             hatchet_id="hatchet-456",
             toml_content="[document]\ngoal = 'test'",
             config_hash="hash123",
@@ -668,6 +702,7 @@ class TestCheckpointFactory:
         )
 
         assert checkpoint.source_version_node_id == "test-svn-123"
+        assert checkpoint.content_kind == "application_note"
         assert checkpoint.hatchet_id == "hatchet-456"
         assert checkpoint.toml_content == "[document]\ngoal = 'test'"
         assert checkpoint.config_hash == "hash123"
@@ -685,6 +720,7 @@ class TestCheckpointPersistenceMethods:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -706,6 +742,7 @@ class TestCheckpointPersistenceMethods:
 
         checkpoint = AutoDocsCheckpoint(
             source_version_node_id="test-svn-uuid",
+            content_kind="application_note",
             config_hash="abc123",
             toml_content="",
             started_at=datetime.now(UTC),
@@ -732,6 +769,7 @@ class TestCheckpointPersistenceMethods:
         checkpoint_data = {
             "version": AUTODOCS_CHECKPOINT_VERSION,
             "source_version_node_id": "test-svn",
+            "content_kind": "application_note",
             "config_hash": "abc123",
             "toml_content": "[doc]",
             "started_at": "2024-01-15T10:30:00Z",
@@ -751,6 +789,7 @@ class TestCheckpointPersistenceMethods:
             result = await AutoDocsCheckpoint.load_for_resume(
                 bucket="test-bucket",
                 svn_id="test-svn",
+                content_kind="application_note",
                 config_hash="abc123",
                 use_tagging=True,
                 s3_client=mock_s3,
@@ -770,6 +809,7 @@ class TestCheckpointPersistenceMethods:
         checkpoint_data = {
             "version": AUTODOCS_CHECKPOINT_VERSION,
             "source_version_node_id": "test-svn",
+            "content_kind": "application_note",
             "config_hash": "old_hash",
             "toml_content": "[doc]",
             "started_at": "2024-01-15T10:30:00Z",
@@ -788,6 +828,7 @@ class TestCheckpointPersistenceMethods:
         result = await AutoDocsCheckpoint.load_for_resume(
             bucket="test-bucket",
             svn_id="test-svn",
+            content_kind="application_note",
             config_hash="new_hash",  # Different hash
             use_tagging=True,
             s3_client=mock_s3,
@@ -808,6 +849,7 @@ class TestCheckpointPersistenceMethods:
         result = await AutoDocsCheckpoint.load_for_resume(
             bucket="test-bucket",
             svn_id="nonexistent",
+            content_kind="application_note",
             config_hash="abc123",
             use_tagging=True,
             s3_client=mock_s3,
