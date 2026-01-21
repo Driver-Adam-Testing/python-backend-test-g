@@ -6,8 +6,6 @@ from math import ceil
 from typing import Any
 
 from database.models_enums import ContentKind
-from shared.file_storage.aws_s3_client import org_id_to_hash
-from shared.inspector.onboarding.onboard_utils import create_bucket_if_dne
 from workflows.autodocs_functions import WriteAutoDocLogInput, write_autodoc_log_task
 
 from .auto_toml.auto_toml import AutoToml
@@ -181,8 +179,7 @@ async def run_autodoc(
                         "organization_id required for AutoDocs - cannot resolve checkpoint bucket"
                     )
 
-                bucket = org_id_to_hash(org_id)
-                await asyncio.to_thread(create_bucket_if_dne, bucket)
+                bucket = os.environ["INSPECTOR_BUCKET_NAME"]
 
                 # First pass: try to load checkpoint with any config (we don't know config_hash yet)
                 # We need to check if TOML content exists to decide whether to run AutoTOML
@@ -257,8 +254,7 @@ async def run_autodoc(
                 raise ValueError("toml_content required for AutoDocs checkpointing")
 
             config_hash = compute_config_hash(toml_content)
-            bucket = org_id_to_hash(org_id)
-            await asyncio.to_thread(create_bucket_if_dne, bucket)
+            bucket = os.environ["INSPECTOR_BUCKET_NAME"]
 
             use_tagging = config.document.use_tagging
             checkpoint = await AutoDocsCheckpoint.load_for_resume(
