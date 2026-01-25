@@ -42,7 +42,7 @@ jobs:
           OPENAI_API_KEY: fake
         run: poetry run pytest -m unit
       - name: Archive code coverage results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: code-coverage-report
           path: backend/coverage/coverage.xml
